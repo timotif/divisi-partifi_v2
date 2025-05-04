@@ -41,10 +41,6 @@ class PageLoadError(PageError):
     """Raised when loading a page fails."""
     pass
 
-class StaffError(Exception):
-	"""Base exception for Staff-related errors."""
-	pass
-
 class Page:
 	def __init__(self, path: str, grayscale: bool = True):
 		self.score: Score = None
@@ -60,6 +56,10 @@ class Page:
 		if img is None:
 			raise PageLoadError(f"Failed to load image: {self.path}")
 		return img
+
+class StaffError(Exception):
+	"""Base exception for Staff-related errors."""
+	pass
 		
 class Staff:
 	def __init__(self, name: str, short_name: str, y: int, h: int, page: Page = None):
@@ -82,12 +82,12 @@ class Staff:
 			raise StaffError(f"Error cropping staff image: {e}")
 		return img
 
-
 class Part:
 	def __init__(self, name: str, short_name: str, staves: list[Staff]):
 		self.name = name
 		self.short_name = short_name
 		self.staves = staves
+		self.pages = []
 
 try:
 	page = (Page("./img/music.png", grayscale=True))
@@ -95,17 +95,42 @@ try:
 	page_wrong = (Page("./img/wrong", grayscale=False))
 except PageLoadError as e:
 	print(f"Error loading page: {e}")
-names = ["fl", "picc", "EH"]
+names = ["flute", "piccolo", "English Horn"]
+short_names = ["fl", "picc", "EH"]
+assert len(names) == len(short_names), "Names and short names must have the same length"
 name_idx = 0
+parts = [] # will be a list attribute of the score
+parts_dict = {} # will be a dict attribute of the score
 h = 50
-for i in range(0, page.img.shape[0], 50):
+cuts = range(0, page.img.shape[0], h) # example cut positions all at the same distance
+for cut in cuts:
+	# Create a staff for each cut
 	name = names[name_idx]
-	staff = Staff(name, name, i, h, page)
-	name_idx = (name_idx + 1) % len(names)
+	short_name = short_names[name_idx]
+	staff = Staff(name, short_name, cut, h, page)
+	# Append the staff to the page
 	page.staves.append(staff)
+	# Add the staff to the right part
+	# Check if the part already exists
+	if name in parts_dict:
+		part = parts_dict[name]
+		# print(f"Adding staff {name} to existing part {part.name}")
+	else:
+		# Create a new part
+		part = Part(name, short_name, [])
+		parts_dict[name] = part
+		parts.append(part)
+		# print(f"Adding new part {name}")
+	part.staves.append(staff)
+	# Spin the name
+	name_idx = (name_idx + 1) % len(names)
 
-for staff in page.staves:
-	show(staff.img, staff.name)
+# for staff in page.staves:
+# 	show(staff.img, staff.name)
+
+for part in parts:
+	print(f"Part: {part.name} has {len(part.staves)} staves")
+	
 
 # if __name__ == "__main__":
 # 	example()
