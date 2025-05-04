@@ -122,8 +122,8 @@ class Part:
 	
 	def _adapt_staff(self, staff: Staff):
 		staff_height, staff_width = staff.img.shape[:2]
-		scale_factor = min(1.0, self.available_width / staff_width)  # Don't upscale if image is smaller
-   		# Calculate new dimensions
+		scale_factor = self.available_width / staff_width 
+		# Calculate new dimensions
 		new_width = int(staff_width * scale_factor)
 		new_height = int(staff_height * scale_factor)
 		# Resize the staff image
@@ -156,7 +156,7 @@ class Part:
 		self.available_height = self.height - self.margins['top'] - self.margins['bottom']
 
 	def process(self):
-		self._layout(dpi=150)
+		self._layout(dpi=100)
 		# Create a blank page with the specified dimensions
 		page = create_blank_page(self.width, self.height)  # White page
 		y_pos = self._reset_y_pos()
@@ -176,7 +176,6 @@ class Part:
 				page = np.ones((self.height, self.width), dtype=np.uint8) * 255
 				y_pos = self._reset_y_pos()
 		self.pages.append(page)
-		show(page, f"Part: {self.name}")
 
 try:
 	page = (Page("./img/music.png", grayscale=True))
@@ -218,8 +217,10 @@ for cut in cuts:
 # 	show(staff.img, staff.name)
 
 for part in parts:
-	print(f"Part: {part.name} has {len(part.staves)} staves")
+	# print(f"Part: {part.name} has {len(part.staves)} staves")
 	part.process()
+	for i, page in enumerate(part.pages):
+		show(page, f"Part: {part.name} - Page {i+1}")
 
 # if __name__ == "__main__":
 # 	example()
