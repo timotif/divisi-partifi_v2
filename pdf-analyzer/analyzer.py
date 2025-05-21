@@ -41,7 +41,8 @@ def example():
 		show(staves[staff], staff)
 
 class Score:
-	def __init__(self, path: str, title: str = None, composer: str = None):
+	def __init__(self, path: str, title: str = None, composer: str = None, keep_temp_files: bool = False):
+		self.keep_temp_files = keep_temp_files
 		self.name = f"{composer}_{title}"
 		self.path = path
 		self.title = title
@@ -63,10 +64,15 @@ class Score:
 	def _extract_pages(self, dpi=300):
 		for page_number, page in enumerate(self.doc):
 			# Render the page to a pixmap without transparency (alpha) and in grayscale
-			pix = page.get_pixmap(dpi=dpi, alpha=False, colorspace="gray")  
-			page_path = os.path.join(TMP_DIR, f"{self.name}_page_{page_number}.png")
-			pix.save(page_path, output='png')
-			self.pages.append(Page(score=self, path=page_path, grayscale=True))
+			pix = page.get_pixmap(dpi=dpi, alpha=False, colorspace="gray")
+			if self.keep_temp_files:
+				page_path = os.path.join(TMP_DIR, f"{self.name}_page_{page_number}.png")
+				pix.save(page_path, output='png')
+				page = Page.from_path(path=page_path, score=self, grayscale=True)
+			else:
+				page = Page.from_pixmap(pix, score=self)
+			# Append the page to the score
+			self.pages.append(page)
 
 class PageError(Exception):
 	"""Base exception for Page-related errors."""
@@ -77,26 +83,50 @@ class PageLoadError(PageError):
 	pass
 
 class Page:
-	def __init__(self, score: Score = None, path: str = None, grayscale: bool = True):
+	def __init__(self, score: Score = None):
 		self.score: Score = score
-		self.path: str = path
+		self.path: str = None
 		self.staves: Staff = []
-		self.img = self._load_image(grayscale)
+		self.img = None
+	
+	@classmethod
+	def from_path(cls, path: str, score: Score = None, grayscale: bool = True):
+		"""Create a Page instance from a file path."""
+		page = cls(score=score)
+		page.path = path
+		if not os.path.exists(path):
+			raise PageLoadError(f"File not found: {path}")
+		page.img = cv2.imread(path, cv2.IMREAD_GRAYSCALE) if grayscale else cv2.imread(path)
+		if page.img is None:
+			raise PageLoadError(f"Failed to load image: {path}")
+		return page
+
+	@classmethod
+	def from_pixmap(cls, pixmap: fitz.Pixmap, score: Score = None):
+		page = cls(score=score)
+		page.img = cls._pixmap_to_numpy(pixmap)
+		return page
+
+	@staticmethod
+	def _pixmap_to_numpy(pixmap):
+		"""Convert a PyMuPDF pixmap to a NumPy array."""
+		# Get pixmap info
+		samples = pixmap.samples
+		width = pixmap.width
+		height = pixmap.height
 		
-	def _load_image(self, grayscale: bool):
-		if self.path:
-			return self._load_image_from_file(grayscale)
-		elif not self.img:
-			raise PageLoadError("No image path provided and no image loaded.")
+		# Create numpy array from pixmap samples
+		if pixmap.n == 1:  # Grayscale
+			return np.frombuffer(samples, dtype=np.uint8).reshape(height, width)
+		else:  # RGB or RGBA
+			return np.frombuffer(samples, dtype=np.uint8).reshape(height, width, pixmap.n)
+			
+	# def _load_image(self, grayscale: bool):
+	# 	if self.path:
+	# 		return self._load_image_from_file(grayscale)
+	# 	elif not self.img:
+	# 		raise PageLoadError("No image path provided and no image loaded.")
 		
-	def _load_image_from_file(self, grayscale: bool):
-		"""Load the image from the given path."""
-		if not os.path.exists(self.path):
-			raise PageLoadError(f"File not found: {self.path}")
-		img = cv2.imread(self.path, cv2.IMREAD_GRAYSCALE) if grayscale else cv2.imread(self.path)
-		if img is None:
-			raise PageLoadError(f"Failed to load image: {self.path}")
-		return img
 
 class StaffError(Exception):
 	"""Base exception for Staff-related errors."""
@@ -218,7 +248,7 @@ def example_page():
 
 def example_score():
 	try:
-		score = Score(SCORE_PATH, title= "Bella mia fiamma", composer="W. A. Mozart")
+		score = Score(SCORE_PATH, title= "Bella mia fiamma", composer="W. A. Mozart", keep_temp_files=False)
 		score._extract_pages()
 	except FileNotFoundError as e:
 		print(f"Error loading score: {e}")
