@@ -1,6 +1,7 @@
 import os
 import cv2
 import numpy as np
+import pymupdf as fitz
 
 def show(img, title="Image"):
 	cv2.imshow(title, img)
@@ -40,10 +41,32 @@ def example():
 		show(staves[staff], staff)
 
 class Score:
-	def __init__(self, path: str):
+	def __init__(self, path: str, title: str = None, composer: str = None):
+		self.name = f"{composer}_{title}"
 		self.path = path
-		# TODO: Implement the logic to read the score from the PDF file
-		self.pages: Page = []
+		self.title = title
+		self.composer = composer
+		# TODO: Sanitize path, title and composer
+		self.doc = self._load_pdf()
+		self.pages: list[Page] = []
+		self.parts: list[Part] = []
+		self.parts_dict: dict[str:Part] = {}
+	
+	def _load_pdf(self):
+		"""Load the PDF file and extract pages."""
+		if not os.path.exists(self.path):
+			raise FileNotFoundError(f"File not found: {self.path}")
+		# Open the PDF file
+		doc = fitz.open(self.path)
+		return doc
+	
+	def _extract_pages(self, dpi=300):
+		for page_number, page in enumerate(self.doc):
+			# Render the page to a pixmap without transparency (alpha) and in grayscale
+			pix = page.get_pixmap(dpi=dpi, alpha=False, colorspace="gray")  
+			page_path = os.path.join(TMP_DIR, f"{self.name}_page_{page_number}.png")
+			pix.save(page_path, output='png')
+			self.pages.append(Page(score=self, path=page_path, grayscale=True))
 
 class PageError(Exception):
 	"""Base exception for Page-related errors."""
@@ -54,13 +77,19 @@ class PageLoadError(PageError):
 	pass
 
 class Page:
-	def __init__(self, path: str, grayscale: bool = True):
-		self.score: Score = None
-		self.path = path
+	def __init__(self, score: Score = None, path: str = None, grayscale: bool = True):
+		self.score: Score = score
+		self.path: str = path
 		self.staves: Staff = []
 		self.img = self._load_image(grayscale)
 		
 	def _load_image(self, grayscale: bool):
+		if self.path:
+			return self._load_image_from_file(grayscale)
+		elif not self.img:
+			raise PageLoadError("No image path provided and no image loaded.")
+		
+	def _load_image_from_file(self, grayscale: bool):
 		"""Load the image from the given path."""
 		if not os.path.exists(self.path):
 			raise PageLoadError(f"File not found: {self.path}")
@@ -101,6 +130,7 @@ class PartError(Exception):
 class PartLoadError(PartError):
 	"""Raised when loading a part fails."""
 	pass
+
 class PartSaveError(PartError):
 	"""Raised when saving a part fails."""
 	pass
@@ -177,50 +207,73 @@ class Part:
 				y_pos = self._reset_y_pos()
 		self.pages.append(page)
 
-try:
-	page = (Page("./img/music.png", grayscale=True))
-	# show(page.img, "Page")
-	page_wrong = (Page("./img/wrong", grayscale=False))
-except PageLoadError as e:
-	print(f"Error loading page: {e}")
-names = ["flute", "piccolo", "English Horn"]
-short_names = ["fl", "picc", "EH"]
-assert len(names) == len(short_names), "Names and short names must have the same length"
-name_idx = 0
-parts = [] # will be a list attribute of the score
-parts_dict = {} # will be a dict attribute of the score
-h = 50
-cuts = range(0, page.img.shape[0], h) # example cut positions all at the same distance
-for cut in cuts:
-	# Create a staff for each cut
-	name = names[name_idx]
-	short_name = short_names[name_idx]
-	staff = Staff(name, short_name, cut, h, page)
-	# Append the staff to the page
-	page.staves.append(staff)
-	# Add the staff to the right part
-	# Check if the part already exists
-	if name in parts_dict:
-		part = parts_dict[name]
-		# print(f"Adding staff {name} to existing part {part.name}")
-	else:
-		# Create a new part
-		part = Part(name, short_name, [])
-		parts_dict[name] = part
-		parts.append(part)
-		# print(f"Adding new part {name}")
-	part.staves.append(staff)
-	# Spin the name
-	name_idx = (name_idx + 1) % len(names)
+def example_page():
+	try:
+		page = (Page("./img/music.png", grayscale=True))
+		# show(page.img, "Page")
+		# page_wrong = (Page("./img/wrong", grayscale=False))
+		return page
+	except PageLoadError as e:
+		print(f"Error loading page: {e}")
 
-# for staff in page.staves:
-# 	show(staff.img, staff.name)
+def example_score():
+	try:
+		score = Score(SCORE_PATH, title= "Bella mia fiamma", composer="W. A. Mozart")
+		score._extract_pages()
+	except FileNotFoundError as e:
+		print(f"Error loading score: {e}")
+		return None
+	return score
 
-for part in parts:
-	# print(f"Part: {part.name} has {len(part.staves)} staves")
-	part.process()
-	for i, page in enumerate(part.pages):
-		show(page, f"Part: {part.name} - Page {i+1}")
+def example():
+	score = example_score()
+	# exit()
+	# page = example_page()
+	names = ["flute", "piccolo", "English Horn"]
+	short_names = ["fl", "picc", "EH"]
+	assert len(names) == len(short_names), "Names and short names must have the same length"
+	name_idx = 0
+	parts = [] # will be a list attribute of the score
+	parts_dict = {} # will be a dict attribute of the score
+	h = 50
+	for page in score.pages:
+		cuts = range(0, page.img.shape[0], h) # example cut positions all at the same distance
+		for cut in cuts:
+			# Create a staff for each cut
+			name = names[name_idx]
+			short_name = short_names[name_idx]
+			staff = Staff(name, short_name, cut, h, page)
+			# Append the staff to the page
+			page.staves.append(staff)
+			# Add the staff to the right part
+			# Check if the part already exists
+			if name in parts_dict:
+				part = parts_dict[name]
+				# print(f"Adding staff {name} to existing part {part.name}")
+			else:
+				# Create a new part
+				part = Part(name, short_name, [])
+				parts_dict[name] = part
+				parts.append(part)
+				# print(f"Adding new part {name}")
+			part.staves.append(staff)
+			# Spin the name
+			name_idx = (name_idx + 1) % len(names)
 
-# if __name__ == "__main__":
-# 	example()
+		# for staff in page.staves:
+		# 	show(staff.img, staff.name)
+
+	for part in parts:
+		# print(f"Part: {part.name} has {len(part.staves)} staves")
+		part.process()
+		for i, page in enumerate(part.pages):
+			show(page, f"Part: {part.name} - Page {i+1}")
+
+TMP_DIR = os.path.join(os.path.dirname(__file__), "tmp")
+PAGE_PATH = "./img/music.png"
+SCORE_PATH = "./img/score.pdf"
+
+if __name__ == "__main__":
+	if not os.path.exists(TMP_DIR):
+		os.makedirs(TMP_DIR)
+	example()
