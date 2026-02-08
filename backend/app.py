@@ -313,20 +313,17 @@ def download_part(score_id: str, part_name: str):
 	# Build a PDF from the part's output page images using PyMuPDF
 	pdf_doc = fitz.open()
 	for page_img in part.pages:
-		success, png_buf = cv2.imencode('.png', page_img)
+		success, jpg_buf = cv2.imencode('.jpg', page_img, [cv2.IMWRITE_JPEG_QUALITY, 92])
 		if not success:
 			abort(500, description=f"Failed to encode page image for part '{part_name}'")
 
-		# Insert the PNG as a new page in the PDF
-		img_doc = fitz.open(stream=png_buf.tobytes(), filetype="png")
+		img_bytes = jpg_buf.tobytes()
 		# Create a page matching the image dimensions (in points: 72 DPI)
-		# Part.process() uses dpi=100, so convert from 100 DPI pixels to 72 DPI points
 		h_px, w_px = page_img.shape[:2]
-		w_pt = w_px * 72 / 100
-		h_pt = h_px * 72 / 100
+		w_pt = w_px * 72 / part.dpi
+		h_pt = h_px * 72 / part.dpi
 		pdf_page = pdf_doc.new_page(width=w_pt, height=h_pt)
-		pdf_page.insert_image(fitz.Rect(0, 0, w_pt, h_pt), stream=png_buf.tobytes())
-		img_doc.close()
+		pdf_page.insert_image(fitz.Rect(0, 0, w_pt, h_pt), stream=img_bytes)
 
 	pdf_bytes = pdf_doc.tobytes()
 	pdf_doc.close()

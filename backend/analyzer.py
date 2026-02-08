@@ -199,7 +199,8 @@ class Part:
 		new_height = int(staff_height * scale_factor)
 		# Resize the staff image
 		if scale_factor != 1.0:
-			staff_img_resized = cv2.resize(staff.img, (new_width, new_height))
+			interp = cv2.INTER_AREA if scale_factor < 1.0 else cv2.INTER_LANCZOS4
+			staff_img_resized = cv2.resize(staff.img, (new_width, new_height), interpolation=interp)
 		else:
 			staff_img_resized = staff.img
 		return staff_img_resized
@@ -229,7 +230,8 @@ class Part:
 	def process(self):
 		if self.staves:
 			self.width = max(staff.img.shape[1] for staff in self.staves)
-		self._layout(dpi=100)
+		self.dpi = 300
+		self._layout(dpi=self.dpi)
 		# Create a blank page with the specified dimensions
 		page = create_blank_page(self.width, self.height)  # White page
 		y_pos = self._reset_y_pos()
