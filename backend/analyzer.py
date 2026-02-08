@@ -182,6 +182,8 @@ class Part:
 		self.short_name = short_name
 		self.staves: list[Staff] = staves
 		self.pages = []
+		self.header_img = None
+		self.header_source_width = None
 		self.width = max([staff.img.shape[1] for staff in staves]) if staves else 0
 		self.spacing = 0
 	
@@ -192,18 +194,28 @@ class Part:
 			return self.margins['top']
 	
 	def _adapt_staff(self, staff: Staff):
-		staff_height, staff_width = staff.img.shape[:2]
-		scale_factor = self.available_width / staff_width 
-		# Calculate new dimensions
-		new_width = int(staff_width * scale_factor)
-		new_height = int(staff_height * scale_factor)
-		# Resize the staff image
-		if scale_factor != 1.0:
-			interp = cv2.INTER_AREA if scale_factor < 1.0 else cv2.INTER_LANCZOS4
-			staff_img_resized = cv2.resize(staff.img, (new_width, new_height), interpolation=interp)
-		else:
-			staff_img_resized = staff.img
-		return staff_img_resized
+		return self._scale_to_width(staff.img)
+
+	def _scale_to_width(self, img):
+		"""Scale an image to fit available_width, preserving aspect ratio."""
+		h, w = img.shape[:2]
+		scale = self.available_width / w
+		return self._scale_img(img, scale)
+
+	def _scale_img(self, img, scale):
+		"""Scale an image by the given factor."""
+		if scale == 1.0:
+			return img
+		h, w = img.shape[:2]
+		new_w = int(w * scale)
+		new_h = int(h * scale)
+		interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LANCZOS4
+		return cv2.resize(img, (new_w, new_h), interpolation=interp)
+
+	def _scale_header(self):
+		"""Scale header image proportionally to how the output page compares to the source page."""
+		scale = self.available_width / self.header_source_width
+		return self._scale_img(self.header_img, scale)
 
 	def _layout(self, page_format: str = "A4", dpi: int = 300):
 		if page_format == "A4": # in mm
@@ -215,7 +227,6 @@ class Part:
 			self.width = to_px(width_mm - margins_mm['left'] - margins_mm['right'], dpi)
 			self.height = to_px(height_mm - margins_mm['top'] - margins_mm['bottom'], dpi)
 			self.spacing = to_px(system_spacing_mm, dpi)
-			self.title_area = to_px(title_area_mm, dpi)
 			self.margins = {
 				'top': to_px(margins_mm['top'], dpi),
 				'bottom': to_px(margins_mm['bottom'], dpi),
@@ -225,6 +236,12 @@ class Part:
 		else:
 			raise ValueError(f"Unsupported page format: {page_format}")
 		self.available_width = self.width - self.margins['left'] - self.margins['right']
+		# Compute title_area from header image if present, otherwise use default
+		if self.header_img is not None:
+			scaled_header = self._scale_header()
+			self.title_area = scaled_header.shape[0] + self.spacing
+		else:
+			self.title_area = to_px(title_area_mm, dpi)
 		self.available_height = self.height - self.margins['top'] - self.margins['bottom']
 
 	def process(self):
@@ -234,6 +251,12 @@ class Part:
 		self._layout(dpi=self.dpi)
 		# Create a blank page with the specified dimensions
 		page = create_blank_page(self.width, self.height)  # White page
+		# Paste header image centered on the first page
+		if self.header_img is not None:
+			scaled = self._scale_header()
+			sh, sw = scaled.shape[:2]
+			x_off = self.margins['left'] + (self.available_width - sw) // 2
+			page[self.margins['top']:self.margins['top'] + sh, x_off:x_off + sw] = scaled
 		y_pos = self._reset_y_pos()
 		for staff in self.staves:
 			# Resize staff image to fit the page width respecting margins

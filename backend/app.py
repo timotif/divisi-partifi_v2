@@ -270,6 +270,25 @@ def partition_score(score_id: str):
 	if not parts_list:
 		abort(400, description="No strips found across all pages")
 
+	# --- Phase 3b: Crop header image if provided ---
+	header_data = data.get('header')
+	if header_data:
+		h_page = header_data.get('page', 0)
+		if h_page < 0 or h_page >= len(score.pages):
+			abort(400, description=f"Header page {h_page} does not exist")
+		h_img = score.pages[h_page].img
+		h_height, h_width = h_img.shape[:2]
+		h_scale = display_width / h_width
+		bx = min(max(round(header_data['x'] / h_scale), 0), h_width)
+		by = min(max(round(header_data['y'] / h_scale), 0), h_height)
+		bw = min(round(header_data['w'] / h_scale), h_width - bx)
+		bh = min(round(header_data['h'] / h_scale), h_height - by)
+		if bw > 0 and bh > 0:
+			header_crop = h_img[by:by + bh, bx:bx + bw].copy()
+			for part in parts_list:
+				part.header_img = header_crop
+				part.header_source_width = h_width
+
 	# --- Phase 4: Process each part (layout onto output pages) ---
 	try:
 		for part in parts_list:

@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Music, Download, Plus, Trash2, Upload, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Music, Download, Plus, Trash2, Upload, ChevronLeft, ChevronRight, Type, X } from 'lucide-react';
 
 const MAX_DISPLAY_WIDTH = 600;
 
@@ -33,6 +33,12 @@ const MusicPartitioner = () => {
 
   // --- Export results ---
   const [exportResult, setExportResult] = useState(null);
+
+  // --- Header region: rectangle selection for piece title ---
+  const [headerRegion, setHeaderRegion] = useState(null); // { page, x, y, w, h } in display pixels
+  const [isSelectingHeader, setIsSelectingHeader] = useState(false);
+  const [headerDragStart, setHeaderDragStart] = useState(null); // { x, y } during drag
+  const [headerDragCurrent, setHeaderDragCurrent] = useState(null); // { x, y } during drag
 
   // --- UI state ---
   const [dragIndex, setDragIndex] = useState(-1);
@@ -290,13 +296,68 @@ const MusicPartitioner = () => {
   };
 
   const handleContainerClick = (e) => {
-    // Don't add divider if we were dragging
-    if (dragIndex !== -1) return;
+    // Don't add divider if we were dragging or selecting header
+    if (dragIndex !== -1 || isSelectingHeader) return;
     const rect = containerRef.current.getBoundingClientRect();
     const clickY = e.clientY - rect.top;
     // Shift+click = system divider, regular click = part divider
     addDividerAtY(clickY, e.shiftKey);
   };
+
+  // --- Header selection drag handlers ---
+  const handleHeaderMouseDown = (e) => {
+    if (!isSelectingHeader) return;
+    e.preventDefault();
+    const rect = containerRef.current.getBoundingClientRect();
+    const start = {
+      x: Math.max(0, Math.min(e.clientX - rect.left, pageWidth)),
+      y: Math.max(0, Math.min(e.clientY - rect.top, pageHeight)),
+    };
+    setHeaderDragStart(start);
+    setHeaderDragCurrent(start);
+  };
+
+  const handleHeaderMouseMove = useCallback((e) => {
+    if (!headerDragStart) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    setHeaderDragCurrent({
+      x: Math.max(0, Math.min(e.clientX - rect.left, pageWidth)),
+      y: Math.max(0, Math.min(e.clientY - rect.top, pageHeight)),
+    });
+  }, [headerDragStart, pageWidth, pageHeight]);
+
+  const handleHeaderMouseUp = useCallback(() => {
+    if (!headerDragStart || !headerDragCurrent) return;
+    const x = Math.min(headerDragStart.x, headerDragCurrent.x);
+    const y = Math.min(headerDragStart.y, headerDragCurrent.y);
+    const w = Math.abs(headerDragCurrent.x - headerDragStart.x);
+    const h = Math.abs(headerDragCurrent.y - headerDragStart.y);
+    if (w > 5 && h > 5) {
+      setHeaderRegion({ page: currentPage, x, y, w, h });
+    }
+    setHeaderDragStart(null);
+    setHeaderDragCurrent(null);
+    setIsSelectingHeader(false);
+  }, [headerDragStart, headerDragCurrent, currentPage]);
+
+  useEffect(() => {
+    if (headerDragStart) {
+      document.addEventListener('mousemove', handleHeaderMouseMove);
+      document.addEventListener('mouseup', handleHeaderMouseUp);
+      return () => {
+        document.removeEventListener('mousemove', handleHeaderMouseMove);
+        document.removeEventListener('mouseup', handleHeaderMouseUp);
+      };
+    }
+  }, [headerDragStart, handleHeaderMouseMove, handleHeaderMouseUp]);
+
+  // Compute the preview rect from drag start/current
+  const headerPreviewRect = headerDragStart && headerDragCurrent ? {
+    x: Math.min(headerDragStart.x, headerDragCurrent.x),
+    y: Math.min(headerDragStart.y, headerDragCurrent.y),
+    w: Math.abs(headerDragCurrent.x - headerDragStart.x),
+    h: Math.abs(headerDragCurrent.y - headerDragStart.y),
+  } : null;
 
   const removeDivider = (index) => {
     updateCurrentPageDividers(prev => prev.filter((_, i) => i !== index));
@@ -444,6 +505,7 @@ const MusicPartitioner = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           display_width: MAX_DISPLAY_WIDTH,
+          ...(headerRegion ? { header: headerRegion } : {}),
           pages: pagesPayload,
         }),
       });
@@ -528,11 +590,34 @@ const MusicPartitioner = () => {
               </button>
               <button
                 onClick={addDivider}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                disabled={isSelectingHeader}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
               >
                 <Plus className="w-4 h-4" />
                 Add Divider
               </button>
+              <button
+                onClick={() => setIsSelectingHeader(!isSelectingHeader)}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                  isSelectingHeader
+                    ? 'bg-green-700 text-white ring-2 ring-green-300'
+                    : headerRegion
+                      ? 'bg-green-600 text-white hover:bg-green-700'
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                <Type className="w-4 h-4" />
+                {isSelectingHeader ? 'Draw Header...' : headerRegion ? 'Header Set' : 'Select Header'}
+              </button>
+              {headerRegion && !isSelectingHeader && (
+                <button
+                  onClick={() => setHeaderRegion(null)}
+                  className="flex items-center gap-1 px-3 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
+                  title="Clear header selection"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
               <button
                 onClick={handleExport}
                 disabled={phase === 'exporting' || strips.length === 0}
@@ -587,9 +672,10 @@ const MusicPartitioner = () => {
             <div className="border-2 border-gray-200 rounded-lg overflow-hidden" style={{ width: pageWidth }}>
               <div
                 ref={containerRef}
-                className="relative bg-white cursor-crosshair select-none"
+                className={`relative bg-white select-none ${isSelectingHeader ? 'cursor-crosshair' : 'cursor-crosshair'}`}
                 style={{ width: pageWidth, height: pageHeight }}
                 onClick={handleContainerClick}
+                onMouseDown={handleHeaderMouseDown}
               >
                 {/* Real page image from backend */}
                 {pageImageUrl && (
@@ -701,6 +787,43 @@ const MusicPartitioner = () => {
                   </div>
                   );
                 })}
+
+                {/* Header selection preview (while dragging) */}
+                {headerPreviewRect && headerPreviewRect.w > 0 && headerPreviewRect.h > 0 && (
+                  <div
+                    className="absolute border-2 border-dashed border-green-500 bg-green-200 bg-opacity-30 z-30 pointer-events-none"
+                    style={{
+                      left: headerPreviewRect.x,
+                      top: headerPreviewRect.y,
+                      width: headerPreviewRect.w,
+                      height: headerPreviewRect.h,
+                    }}
+                  />
+                )}
+
+                {/* Header region overlay (finalized) */}
+                {headerRegion && currentPage === headerRegion.page && (
+                  <div
+                    className="absolute border-2 border-green-600 bg-green-200 bg-opacity-30 z-30"
+                    style={{
+                      left: headerRegion.x,
+                      top: headerRegion.y,
+                      width: headerRegion.w,
+                      height: headerRegion.h,
+                    }}
+                  >
+                    <div className="absolute top-1 left-2 bg-green-700 text-white px-2 py-0.5 rounded text-xs">
+                      Header
+                    </div>
+                    <button
+                      className="absolute top-1 right-1 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center hover:bg-red-600 transition-colors text-white z-40"
+                      onClick={(e) => { e.stopPropagation(); setHeaderRegion(null); }}
+                      title="Clear header"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
