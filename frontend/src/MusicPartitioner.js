@@ -6,7 +6,9 @@ import Toolbar from './components/Toolbar';
 import StripNamesColumn from './components/StripNamesColumn';
 import ScoreCanvas from './components/ScoreCanvas';
 
-const MAX_DISPLAY_WIDTH = 600;
+const STRIP_COLUMN_WIDTH = 160;
+const GAP = 16;
+const MIN_PAGE_WIDTH = 400;
 
 const MusicPartitioner = () => {
   // --- App lifecycle ---
@@ -27,13 +29,9 @@ const MusicPartitioner = () => {
   const [confirmedPages, setConfirmedPages] = useState(new Set());
 
   // --- System dividers: per-page, parallel boolean array ---
-  // systemDividersByPage[pageNum][i] = true means dividersByPage[pageNum][i] is a system divider.
-  // System dividers mark system boundaries (rendered in red). Regular dividers mark staves (blue).
-  // Auto-fill resets at system dividers.
   const [systemDividersByPage, setSystemDividersByPage] = useState({});
 
-  // --- Per-page strip names: { pageNum: ['Violin I', 'Violin II', ...] } ---
-  // Each strip (gap between consecutive dividers) has its own name.
+  // --- Per-page strip names ---
   const [stripNamesByPage, setStripNamesByPage] = useState({});
 
   // --- Export results ---
@@ -47,9 +45,9 @@ const MusicPartitioner = () => {
   const [markings, setMarkings] = useState([]); // [{ page, x, y, w, h }]
   const [isSelectingMarking, setIsSelectingMarking] = useState(false);
 
-  // --- Shared rectangle drag state (used by header and tempo selection) ---
-  const [rectDragStart, setRectDragStart] = useState(null); // { x, y }
-  const [rectDragCurrent, setRectDragCurrent] = useState(null); // { x, y }
+  // --- Shared rectangle drag state ---
+  const [rectDragStart, setRectDragStart] = useState(null);
+  const [rectDragCurrent, setRectDragCurrent] = useState(null);
 
   // --- UI state ---
   const [dragIndex, setDragIndex] = useState(-1);
@@ -59,13 +57,78 @@ const MusicPartitioner = () => {
 
   const containerRef = useRef(null);
 
+  // --- Responsive size measurement ---
+  const scoreAreaRef = useRef(null);
+  const [measuredSize, setMeasuredSize] = useState({ width: 800, height: 600 });
+  const prevPageWidthRef = useRef(null);
+
+  useEffect(() => {
+    if (!scoreAreaRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setMeasuredSize({
+          width: entry.contentRect.width,
+          height: entry.contentRect.height,
+        });
+      }
+    });
+    observer.observe(scoreAreaRef.current);
+    return () => observer.disconnect();
+  }, [phase]); // re-attach when phase changes (upload -> edit)
+
   // --- Computed display dimensions ---
+  // Fit page within both available width and height
   const currentPageMeta = scoreMetadata?.pages?.[currentPage];
   const backendWidth = currentPageMeta?.width || 1;
   const backendHeight = currentPageMeta?.height || 1;
-  const displayScale = MAX_DISPLAY_WIDTH / backendWidth;
-  const pageWidth = MAX_DISPLAY_WIDTH;
+  const availableWidth = Math.max(MIN_PAGE_WIDTH, measuredSize.width - STRIP_COLUMN_WIDTH - GAP);
+  const availableHeight = measuredSize.height > 100 ? measuredSize.height : 600;
+  const scaleByWidth = availableWidth / backendWidth;
+  const scaleByHeight = availableHeight / backendHeight;
+  const displayScale = Math.min(scaleByWidth, scaleByHeight);
+  const pageWidth = Math.round(backendWidth * displayScale);
   const pageHeight = Math.round(backendHeight * displayScale);
+
+  // --- Rescale annotations when pageWidth changes ---
+  useEffect(() => {
+    const oldWidth = prevPageWidthRef.current;
+    if (oldWidth === null || oldWidth === pageWidth) {
+      prevPageWidthRef.current = pageWidth;
+      return;
+    }
+    const ratio = pageWidth / oldWidth;
+    prevPageWidthRef.current = pageWidth;
+
+    // Rescale all dividers
+    setDividersByPage(prev => {
+      const next = {};
+      for (const [page, divs] of Object.entries(prev)) {
+        next[page] = divs.map(y => Math.round(y * ratio));
+      }
+      return next;
+    });
+
+    // Rescale header region
+    setHeaderRegion(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        x: Math.round(prev.x * ratio),
+        y: Math.round(prev.y * ratio),
+        w: Math.round(prev.w * ratio),
+        h: Math.round(prev.h * ratio),
+      };
+    });
+
+    // Rescale markings
+    setMarkings(prev => prev.map(m => ({
+      ...m,
+      x: Math.round(m.x * ratio),
+      y: Math.round(m.y * ratio),
+      w: Math.round(m.w * ratio),
+      h: Math.round(m.h * ratio),
+    })));
+  }, [pageWidth]);
 
   // --- Current page dividers, strip names, and system divider flags ---
   const currentDividers = dividersByPage[currentPage] || [];
@@ -73,17 +136,12 @@ const MusicPartitioner = () => {
   const currentSystemDividers = systemDividersByPage[currentPage] || [];
 
   // --- Strips computation ---
-  // Strips form between consecutive dividers, EXCEPT:
-  // - No strip between a part divider and the next system divider (dead space between systems)
-  // A system divider is an upper bound: it's the top edge of the next system's first strip.
   const getStrips = useCallback(() => {
     if (currentDividers.length < 2) return [];
-    // Dividers are already sorted. Walk pairs and create strips where appropriate.
     const strips = [];
     for (let j = 0; j < currentDividers.length - 1; j++) {
       const isTopSystem = !!currentSystemDividers[j];
       const isBotSystem = !!currentSystemDividers[j + 1];
-      // Skip if the bottom divider is a system divider — that gap is dead space
       if (isBotSystem) continue;
       strips.push({
         start: currentDividers[j],
@@ -97,38 +155,28 @@ const MusicPartitioner = () => {
 
   const strips = getStrips();
 
-  // --- Auto-fill: when user edits a strip and blurs, fill subsequent strips ---
-  // The known sequence = first system's instrument order.
-  // Sequence ends at the first name repeat OR at a system divider boundary.
-  // Auto-fill finds the edited name in the sequence and continues cyclically,
-  // resetting at each system divider.
+  // --- Auto-fill ---
   const autoFillStripNames = useCallback((names, currentStrips, editedIndex) => {
     const stripCount = currentStrips.length;
-    // Build the known sequence: consecutive non-empty unique names from strip 0,
-    // stopping at the first repeat or system divider
     const knownNames = [];
     const seen = new Set();
     for (let i = 0; i < names.length && i < stripCount; i++) {
-      if (i > 0 && currentStrips[i].isSystemStart) break; // system divider = new system
+      if (i > 0 && currentStrips[i].isSystemStart) break;
       const name = names[i];
       if (name === undefined || name === '') break;
-      if (seen.has(name)) break; // repeat = next system started
+      if (seen.has(name)) break;
       seen.add(name);
       knownNames.push(name);
     }
     if (knownNames.length === 0) return names;
 
-    // Find where the edited strip's name falls in the known sequence
     const editedName = names[editedIndex];
     let seqIndex = knownNames.indexOf(editedName);
-    if (seqIndex === -1) return names; // name not in known sequence, don't auto-fill
+    if (seqIndex === -1) return names;
 
-    // Fill strips after editedIndex by continuing from seqIndex+1 in the cycle.
-    // Reset the cycle at each system divider.
     const result = [...names];
     for (let i = editedIndex + 1; i < stripCount; i++) {
       if (currentStrips[i].isSystemStart) {
-        // System divider: reset cycle to the beginning of the sequence
         seqIndex = -1;
       }
       seqIndex++;
@@ -137,7 +185,7 @@ const MusicPartitioner = () => {
     return result;
   }, []);
 
-  // --- Helper: get the most recently confirmed page's dividers (before pageNum) ---
+  // --- Helper: get the most recently confirmed page's dividers ---
   const getLatestConfirmedDividers = useCallback((beforePage) => {
     for (let i = beforePage - 1; i >= 0; i--) {
       if (confirmedPages.has(i)) {
@@ -216,6 +264,8 @@ const MusicPartitioner = () => {
       setSystemDividersByPage(initialSystemDividers);
       setConfirmedPages(new Set());
       setExportResult(null);
+      // Reset prevPageWidthRef so rescaling doesn't trigger on fresh upload
+      prevPageWidthRef.current = null;
 
       setPageImageUrl(`/api/scores/${data.score_id}/pages/0`);
       setPhase('edit');
@@ -235,10 +285,9 @@ const MusicPartitioner = () => {
       const latestStripNames = getLatestConfirmedStripNames(pageNum);
       const latestSystemDividers = getLatestConfirmedSystemDividers(pageNum);
 
-      // Build strips from propagated dividers/flags for autofill
       const derivedStrips = [];
       for (let j = 0; j < latestDividers.length - 1; j++) {
-        if (latestSystemDividers[j + 1]) continue; // dead-space gap
+        if (latestSystemDividers[j + 1]) continue;
         derivedStrips.push({
           start: latestDividers[j],
           end: latestDividers[j + 1],
@@ -246,7 +295,6 @@ const MusicPartitioner = () => {
           isSystemStart: !!latestSystemDividers[j],
         });
       }
-      // Run autofill on propagated names so subsequent pages get filled names
       const filledNames = derivedStrips.length > 0
         ? autoFillStripNames([...latestStripNames], derivedStrips, 0)
         : [...latestStripNames];
@@ -271,10 +319,8 @@ const MusicPartitioner = () => {
 
   // --- Divider management ---
   const addDividerAtY = (y, isSystem = false) => {
-    // Dividers are always kept sorted. Insert system flag at the matching sorted position.
     setDividersByPage(prev => {
       const divs = prev[currentPage] || [];
-      // Find the sorted insertion index for y
       let insertIdx = 0;
       while (insertIdx < divs.length && divs[insertIdx] < y) insertIdx++;
       const newDividers = [...divs];
@@ -293,7 +339,6 @@ const MusicPartitioner = () => {
   };
 
   const addDivider = () => {
-    // Place new divider below the last existing one, or at 1/3 of the page if none exist
     const divs = currentDividers;
     let newY;
     if (divs.length === 0) {
@@ -310,15 +355,12 @@ const MusicPartitioner = () => {
   const suppressNextClick = useRef(false);
 
   const handleContainerClick = (e) => {
-    // Don't add divider if we were dragging, in rect selection mode,
-    // or if a rect drag just finished (mouseup resets the mode before click fires)
     if (dragIndex !== -1 || isRectSelecting || suppressNextClick.current) {
       suppressNextClick.current = false;
       return;
     }
     const rect = containerRef.current.getBoundingClientRect();
     const clickY = e.clientY - rect.top;
-    // Shift+click = system divider, regular click = part divider
     addDividerAtY(clickY, e.shiftKey);
   };
 
@@ -376,7 +418,6 @@ const MusicPartitioner = () => {
     }
   }, [rectDragStart, handleRectMouseMove, handleRectMouseUp]);
 
-  // Compute the preview rect from drag start/current
   const rectPreview = rectDragStart && rectDragCurrent ? {
     x: Math.min(rectDragStart.x, rectDragCurrent.x),
     y: Math.min(rectDragStart.y, rectDragCurrent.y),
@@ -386,18 +427,11 @@ const MusicPartitioner = () => {
 
   const removeDivider = (index) => {
     updateCurrentPageDividers(prev => prev.filter((_, i) => i !== index));
-    // Remove the system divider flag at this index
     setSystemDividersByPage(prev => {
       const flags = [...(prev[currentPage] || [])];
       flags.splice(index, 1);
       return { ...prev, [currentPage]: flags };
     });
-    // Remove the strip name corresponding to the deleted divider.
-    // With N dividers there are N-1 strips. Strip j sits between divider j and divider j+1.
-    // Deleting divider at index i:
-    //   i === 0: strip 0 becomes dead space → remove name 0
-    //   i === N-1 (last): strip N-2 becomes dead space → remove name N-2
-    //   otherwise: strips i-1 and i merge → remove name i (keep upper strip's name)
     setStripNamesByPage(prev => {
       const names = [...(prev[currentPage] || [])];
       const divCount = currentDividers.length;
@@ -417,7 +451,6 @@ const MusicPartitioner = () => {
   };
 
   const updateStripName = (stripIndex, name) => {
-    // Update only this strip on every keystroke (no auto-fill yet)
     setStripNamesByPage(prev => {
       const names = [...(prev[currentPage] || [])];
       names[stripIndex] = name;
@@ -427,7 +460,6 @@ const MusicPartitioner = () => {
   };
 
   const handleStripNameBlur = (stripIndex) => {
-    // On blur, auto-fill strips after this one by continuing from its position in the known sequence
     setStripNamesByPage(prev => {
       const names = [...(prev[currentPage] || [])];
       const filled = autoFillStripNames(names, strips, stripIndex);
@@ -493,8 +525,6 @@ const MusicPartitioner = () => {
     setPhase('exporting');
     setError(null);
 
-    // Send raw markings — the backend handles coordinate conversion,
-    // dead-space filtering, auto-fill, and part deduplication.
     const pagesPayload = {};
     for (let i = 0; i < scoreMetadata.page_count; i++) {
       const dividers = dividersByPage[i] || dividersByPage[0] || [];
@@ -503,9 +533,6 @@ const MusicPartitioner = () => {
 
       if (dividers.length < 2) continue;
 
-      // strip_names: one entry per gap between consecutive dividers.
-      // Dead-space gaps (where systemFlags[j+1] is true) get "".
-      // Real strips map to stripNamesByPage entries by counting real strips seen.
       const stripNames = [];
       let realIdx = 0;
       for (let j = 0; j < dividers.length - 1; j++) {
@@ -529,7 +556,7 @@ const MusicPartitioner = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          display_width: MAX_DISPLAY_WIDTH,
+          display_width: pageWidth,
           ...(headerRegion ? { header: headerRegion } : {}),
           ...(markings.length > 0 ? { markings } : {}),
           pages: pagesPayload,
@@ -557,9 +584,9 @@ const MusicPartitioner = () => {
 
   // --- Render: Edit / Exporting phase ---
   return (
-    <div className="p-6 bg-gray-50 min-h-screen">
-      <div className="max-w-4xl mx-auto">
-        <div className="bg-white rounded-lg shadow-lg p-6">
+    <div className="flex flex-col h-screen bg-surface-bg">
+      <div className="max-w-screen-xl mx-auto w-full flex flex-col min-h-0 flex-1 px-6 pt-4 pb-2">
+        <div className="bg-surface-card rounded-md shadow-sm border border-surface-border px-6 pt-4 pb-3 flex flex-col min-h-0 flex-1">
           {/* Header */}
           <Toolbar
             onNewScore={() => {
@@ -586,17 +613,17 @@ const MusicPartitioner = () => {
 
           {/* Error banner */}
           {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between">
-              <span className="text-red-700">{error}</span>
-              <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700 font-bold">
+            <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-md flex items-center justify-between">
+              <span className="text-danger">{error}</span>
+              <button onClick={() => setError(null)} className="text-danger hover:text-red-700 font-bold">
                 ×
               </button>
             </div>
           )}
 
-          {/* Sheet music container */}
-          <div className="flex items-start gap-4">
-            {/* Strip names column */}
+          {/* Sheet music container — fits viewport */}
+          <div ref={scoreAreaRef} className="flex items-start gap-4 min-h-0 flex-1 overflow-hidden">
+            {/* Part names column */}
             <StripNamesColumn
               strips={strips}
               stripNames={currentStripNames}
@@ -644,8 +671,8 @@ const MusicPartitioner = () => {
           )}
 
           {/* Status info */}
-          <div className="mt-4 text-center text-sm text-gray-600">
-            {currentDividers.length} dividers, {strips.length} strips • Click to add divider, Shift+click for system divider • Type part names to auto-fill
+          <div className="mt-2 text-center text-xs text-gray-400">
+            {currentDividers.length} dividers, {strips.length} parts • Click to add divider, Shift+click for system divider • Type part names to auto-fill
           </div>
         </div>
       </div>

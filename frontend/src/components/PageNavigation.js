@@ -8,9 +8,9 @@ const PageNavigation = ({ currentPage, pageCount, confirmedPages, onGoToPage }) 
       <button
         onClick={() => onGoToPage(currentPage - 1)}
         disabled={currentPage === 0}
-        className="p-2 rounded-lg bg-gray-200 hover:bg-gray-300 disabled:opacity-30 transition-colors"
+        className="p-1.5 rounded-md bg-gray-100 hover:bg-gray-200 disabled:opacity-30 transition-colors"
       >
-        <ChevronLeft className="w-4 h-4" />
+        <ChevronLeft className="w-4 h-4 text-gray-600" />
       </button>
 
       {/* Page dots */}
@@ -19,11 +19,11 @@ const PageNavigation = ({ currentPage, pageCount, confirmedPages, onGoToPage }) 
           <button
             key={i}
             onClick={() => onGoToPage(i)}
-            className={`w-3 h-3 rounded-full transition-colors ${
+            className={`w-2.5 h-2.5 rounded-full transition-colors ${
               i === currentPage
-                ? 'bg-blue-600 ring-2 ring-blue-300'
+                ? 'bg-accent ring-2 ring-accent/30'
                 : confirmedPages.has(i)
-                  ? 'bg-green-500 hover:bg-green-600'
+                  ? 'bg-success hover:bg-success/80'
                   : 'bg-gray-300 hover:bg-gray-400'
             }`}
             title={`Page ${i + 1}${confirmedPages.has(i) ? ' (confirmed)' : ''}`}
@@ -34,12 +34,12 @@ const PageNavigation = ({ currentPage, pageCount, confirmedPages, onGoToPage }) 
       <button
         onClick={() => onGoToPage(currentPage + 1)}
         disabled={currentPage === pageCount - 1}
-        className="p-2 rounded-lg bg-gray-200 hover:bg-gray-300 disabled:opacity-30 transition-colors"
+        className="p-1.5 rounded-md bg-gray-100 hover:bg-gray-200 disabled:opacity-30 transition-colors"
       >
-        <ChevronRight className="w-4 h-4" />
+        <ChevronRight className="w-4 h-4 text-gray-600" />
       </button>
 
-      <span className="text-sm text-gray-600 ml-2">
+      <span className="text-xs text-gray-400 ml-2">
         Page {currentPage + 1} of {pageCount}
       </span>
     </div>

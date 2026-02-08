@@ -14,19 +14,19 @@ const ExportResults = ({ parts, scoreId, onError }) => {
   };
 
   return (
-    <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
-      <h3 className="font-medium text-green-800 mb-2">Parts generated successfully:</h3>
+    <div className="mt-4 p-4 bg-success/5 border border-success/20 rounded-md">
+      <h3 className="font-medium text-success text-sm mb-2">Parts generated successfully:</h3>
       <ul className="space-y-1">
         {parts.map((part) => (
           <li key={part.name} className="flex items-center gap-2">
-            <Download className="w-4 h-4 text-green-600" />
+            <Download className="w-3.5 h-3.5 text-success" />
             <button
               onClick={() => handleDownload(part.name)}
-              className="text-blue-600 hover:underline"
+              className="text-accent hover:underline text-sm"
             >
               {part.name}.pdf
             </button>
-            <span className="text-xs text-gray-500">
+            <span className="text-xs text-gray-400">
               ({part.staves_count} staves, {part.page_count} output pages)
             </span>
           </li>

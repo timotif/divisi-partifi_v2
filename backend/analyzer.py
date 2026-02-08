@@ -25,6 +25,16 @@ def create_blank_page(width, height):
 	"""Create a blank page with the specified width and height."""
 	return np.ones((height, width), dtype=np.uint8) * 255  # White page
 
+def rects_collide(a, b):
+	"""Check if two rectangles (x, y, w, h, ...) overlap."""
+	ax, ay, aw, ah = a[:4]
+	bx, by, bw, bh = b[:4]
+	return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+def x_overlaps(a, b):
+	"""Check if two rectangles (x, y, w, h, ...) share horizontal space."""
+	return a[0] < b[0] + b[2] and b[0] < a[0] + a[2]
+
 def sanitize_string(value: str) -> str:
 	"""Sanitize user-provided strings for use in filenames and paths.
 	Strips path separators, null bytes, and non-printable characters.
@@ -264,31 +274,54 @@ class Part:
 	def _paste_markings(self, page, staff, staff_y_on_page):
 		"""Paste score markings (tempo, recitativo, etc.) onto the output page.
 
-		Two placement modes based on whether the marking was inside the
-		first strip of its system in the source score:
-		- inside_first + is_first_in_system: skip (already in the staff crop)
-		- inside_first + not first: paste just above the staff, stacking upward
-		- not inside_first: paste at the same Y offset from staff top on all staves
+		Places markings at their natural Y position relative to the staff top,
+		then resolves overlaps by pushing colliding markings upward while
+		preserving markings that sit harmlessly to the side.
 		"""
 		if not staff.markings or not staff.source_page_width:
 			return
 		scale = self.available_width / staff.source_page_width
 		gap = max(4, int(self.spacing * 0.1))
-		ceiling = staff_y_on_page  # tracks the top of the pasted area above the staff
-		for ann in staff.markings:
-			if ann['inside_first'] and ann['is_first_in_system']:
-				continue  # already present in the cropped staff image
-			scaled_img = self._scale_img(ann['img'], scale)
-			out_x = self.margins['left'] + int(ann['x_pos'] * scale)
-			if ann['inside_first']:
-				# Stack above the staff, moving the ceiling upward
-				th = scaled_img.shape[0]
-				ceiling -= th + gap
-				out_y = ceiling
-			else:
-				# Preserve relative Y position from the first strip's top
-				out_y = staff_y_on_page + int(ann['y_offset'] * scale)
-			self._paste_img_on_page(page, scaled_img, out_y, out_x)
+
+		# Filter out markings already in the crop
+		to_paste = [
+			m for m in staff.markings
+			if not (m['inside_first'] and m['is_first_in_system'])
+		]
+		if not to_paste:
+			return
+
+		# Build rects: [x, y, w, h, img] in output coords.
+		rects = []
+		for m in to_paste:
+			scaled_img = self._scale_img(m['img'], scale)
+			th, tw = scaled_img.shape[:2]
+			out_x = self.margins['left'] + int(m['x_pos'] * scale)
+			out_y = staff_y_on_page + int(m['y_offset'] * scale)
+			rects.append([out_x, out_y, tw, th, scaled_img])
+
+		# Distance = rect_bottom - staff_top. Positive → inside the strip,
+		# negative → already above. Sort descending (most inside first).
+		rects.sort(key=lambda r: r[1] + r[3] - staff_y_on_page, reverse=True)
+
+		# Push each rect up by its overlap distance with the staff top,
+		# then cascade: if the moved rect collides with another in the
+		# same column, push that one up by the same amount.
+		for i, rect in enumerate(rects):
+			dist = (rect[1] + rect[3]) - staff_y_on_page
+			if dist <= 0:
+				continue
+			shift = dist + gap
+			rect[1] -= shift
+			# Cascade to any x-overlapping rect that now collides
+			for j in range(len(rects)):
+				if j == i:
+					continue
+				if x_overlaps(rect, rects[j]) and rects_collide(rect, rects[j]):
+					rects[j][1] -= shift
+
+		for x, y, w, h, img in rects:
+			self._paste_img_on_page(page, img, y, x)
 
 	def process(self):
 		if self.staves:
