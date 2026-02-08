@@ -218,13 +218,30 @@ const MusicPartitioner = () => {
       const latestDividers = getLatestConfirmedDividers(pageNum);
       const latestStripNames = getLatestConfirmedStripNames(pageNum);
       const latestSystemDividers = getLatestConfirmedSystemDividers(pageNum);
+
+      // Build strips from propagated dividers/flags for autofill
+      const derivedStrips = [];
+      for (let j = 0; j < latestDividers.length - 1; j++) {
+        if (latestSystemDividers[j + 1]) continue; // dead-space gap
+        derivedStrips.push({
+          start: latestDividers[j],
+          end: latestDividers[j + 1],
+          height: latestDividers[j + 1] - latestDividers[j],
+          isSystemStart: !!latestSystemDividers[j],
+        });
+      }
+      // Run autofill on propagated names so subsequent pages get filled names
+      const filledNames = derivedStrips.length > 0
+        ? autoFillStripNames([...latestStripNames], derivedStrips, 0)
+        : [...latestStripNames];
+
       setDividersByPage(prev => ({
         ...prev,
         [pageNum]: prev[pageNum]?.length ? prev[pageNum] : [...latestDividers],
       }));
       setStripNamesByPage(prev => ({
         ...prev,
-        [pageNum]: prev[pageNum]?.length ? prev[pageNum] : [...latestStripNames],
+        [pageNum]: prev[pageNum]?.length ? prev[pageNum] : filledNames,
       }));
       setSystemDividersByPage(prev => ({
         ...prev,
@@ -234,7 +251,7 @@ const MusicPartitioner = () => {
 
     setCurrentPage(pageNum);
     setPageImageUrl(`/api/scores/${scoreId}/pages/${pageNum}`);
-  }, [scoreMetadata, scoreId, confirmedPages, getLatestConfirmedDividers, getLatestConfirmedStripNames, getLatestConfirmedSystemDividers]);
+  }, [scoreMetadata, scoreId, confirmedPages, getLatestConfirmedDividers, getLatestConfirmedStripNames, getLatestConfirmedSystemDividers, autoFillStripNames]);
 
   // --- Divider management ---
   const addDividerAtY = (y, isSystem = false) => {
@@ -289,12 +306,27 @@ const MusicPartitioner = () => {
       flags.splice(index, 1);
       return { ...prev, [currentPage]: flags };
     });
-    // Also clean up strip names (one fewer strip = one fewer name slot)
+    // Remove the strip name corresponding to the deleted divider.
+    // With N dividers there are N-1 strips. Strip j sits between divider j and divider j+1.
+    // Deleting divider at index i:
+    //   i === 0: strip 0 becomes dead space → remove name 0
+    //   i === N-1 (last): strip N-2 becomes dead space → remove name N-2
+    //   otherwise: strips i-1 and i merge → remove name i (keep upper strip's name)
     setStripNamesByPage(prev => {
       const names = [...(prev[currentPage] || [])];
-      const newDividerCount = (prev[currentPage]?.length || currentDividers.length) - 1;
-      const newStripCount = Math.max(0, newDividerCount - 1);
-      return { ...prev, [currentPage]: names.slice(0, newStripCount) };
+      const divCount = currentDividers.length;
+      let removeIdx;
+      if (index === 0) {
+        removeIdx = 0;
+      } else if (index === divCount - 1) {
+        removeIdx = divCount - 2;
+      } else {
+        removeIdx = index;
+      }
+      if (removeIdx >= 0 && removeIdx < names.length) {
+        names.splice(removeIdx, 1);
+      }
+      return { ...prev, [currentPage]: names };
     });
   };
 
