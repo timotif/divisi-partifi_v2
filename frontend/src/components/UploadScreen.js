@@ -8,7 +8,7 @@ const UploadScreen = ({ onUpload, uploading, error }) => {
     <div className="p-6 bg-surface-bg min-h-screen">
       <div className="max-w-2xl mx-auto">
         <div className="bg-surface-card rounded-md shadow-sm border border-surface-border p-6">
-          <h1 className="text-xl font-semibold text-gray-700 mb-8">Partifi</h1>
+          <h1 className="text-xl font-semibold text-gray-700 mb-8">Divisi</h1>
 
           <div className="border border-dashed border-surface-border rounded-md p-12 text-center">
             <input
