@@ -1,5 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Music, Download, Plus, Trash2, Upload, ChevronLeft, ChevronRight, Type, X, Clock } from 'lucide-react';
+import UploadScreen from './components/UploadScreen';
+import ExportResults from './components/ExportResults';
+import PageNavigation from './components/PageNavigation';
+import Toolbar from './components/Toolbar';
+import StripNamesColumn from './components/StripNamesColumn';
+import ScoreCanvas from './components/ScoreCanvas';
 
 const MAX_DISPLAY_WIDTH = 600;
 
@@ -53,7 +58,6 @@ const MusicPartitioner = () => {
   const [error, setError] = useState(null);
 
   const containerRef = useRef(null);
-  const fileInputRef = useRef(null);
 
   // --- Computed display dimensions ---
   const currentPageMeta = scoreMetadata?.pages?.[currentPage];
@@ -548,40 +552,7 @@ const MusicPartitioner = () => {
 
   // --- Render: Upload phase ---
   if (phase === 'upload') {
-    return (
-      <div className="p-6 bg-gray-50 min-h-screen">
-        <div className="max-w-4xl mx-auto">
-          <div className="bg-white rounded-lg shadow-lg p-6">
-            <div className="flex items-center gap-2 mb-8">
-              <Music className="w-6 h-6 text-blue-600" />
-              <h1 className="text-2xl font-bold text-gray-800">Music Score Partitioner</h1>
-            </div>
-
-            <div className="border-2 border-dashed border-gray-300 rounded-lg p-12 text-center">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf"
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files[0]) handleUpload(e.target.files[0]);
-                }}
-              />
-              <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-              <p className="text-gray-600 mb-4">Upload a PDF score to extract individual parts</p>
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploading}
-                className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
-              >
-                {uploading ? 'Processing...' : 'Select PDF Score'}
-              </button>
-              {error && <p className="mt-4 text-red-600">{error}</p>}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
+    return <UploadScreen onUpload={handleUpload} uploading={uploading} error={error} />;
   }
 
   // --- Render: Edit / Exporting phase ---
@@ -590,88 +561,28 @@ const MusicPartitioner = () => {
       <div className="max-w-4xl mx-auto">
         <div className="bg-white rounded-lg shadow-lg p-6">
           {/* Header */}
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-2">
-              <Music className="w-6 h-6 text-blue-600" />
-              <h1 className="text-2xl font-bold text-gray-800">Music Score Partitioner</h1>
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                onClick={() => {
-                  setPhase('upload');
-                  setScoreId(null);
-                  setScoreMetadata(null);
-                  setExportResult(null);
-                  setError(null);
-                }}
-                className="flex items-center gap-2 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
-              >
-                <Upload className="w-4 h-4" />
-                New Score
-              </button>
-              <button
-                onClick={addDivider}
-                disabled={isRectSelecting}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
-              >
-                <Plus className="w-4 h-4" />
-                Add Divider
-              </button>
-              <button
-                onClick={() => { setIsSelectingHeader(!isSelectingHeader); setIsSelectingMarking(false); }}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                  isSelectingHeader
-                    ? 'bg-green-700 text-white ring-2 ring-green-300'
-                    : headerRegion
-                      ? 'bg-green-600 text-white hover:bg-green-700'
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                }`}
-              >
-                <Type className="w-4 h-4" />
-                {isSelectingHeader ? 'Draw Header...' : headerRegion ? 'Header Set' : 'Select Header'}
-              </button>
-              {headerRegion && !isSelectingHeader && (
-                <button
-                  onClick={() => setHeaderRegion(null)}
-                  className="flex items-center gap-1 px-3 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
-                  title="Clear header selection"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              )}
-              <button
-                onClick={() => { setIsSelectingMarking(!isSelectingMarking); setIsSelectingHeader(false); }}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                  isSelectingMarking
-                    ? 'bg-amber-700 text-white ring-2 ring-amber-300'
-                    : markings.length > 0
-                      ? 'bg-amber-600 text-white hover:bg-amber-700'
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                }`}
-              >
-                <Clock className="w-4 h-4" />
-                {isSelectingMarking ? 'Draw Marking...' : markings.length > 0 ? `Marking (${markings.length})` : 'Select Marking'}
-              </button>
-              {markings.length > 0 && !isSelectingMarking && (
-                <button
-                  onClick={() => setMarkings([])}
-                  className="flex items-center gap-1 px-3 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
-                  title="Clear all markings"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              )}
-              <button
-                onClick={handleExport}
-                disabled={phase === 'exporting' || strips.length === 0}
-                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
-              >
-                <Download className="w-4 h-4" />
-                {phase === 'exporting' ? 'Exporting...' : `Export Parts (${strips.length} strips)`}
-              </button>
-            </div>
-          </div>
+          <Toolbar
+            onNewScore={() => {
+              setPhase('upload');
+              setScoreId(null);
+              setScoreMetadata(null);
+              setExportResult(null);
+              setError(null);
+            }}
+            onAddDivider={addDivider}
+            onExport={handleExport}
+            onToggleSelectHeader={() => { setIsSelectingHeader(!isSelectingHeader); setIsSelectingMarking(false); }}
+            onClearHeader={() => setHeaderRegion(null)}
+            onToggleSelectMarking={() => { setIsSelectingMarking(!isSelectingMarking); setIsSelectingHeader(false); }}
+            onClearMarkings={() => setMarkings([])}
+            isRectSelecting={isRectSelecting}
+            isSelectingHeader={isSelectingHeader}
+            isSelectingMarking={isSelectingMarking}
+            hasHeader={!!headerRegion}
+            markingCount={markings.length}
+            isExporting={phase === 'exporting'}
+            stripCount={strips.length}
+          />
 
           {/* Error banner */}
           {error && (
@@ -686,296 +597,50 @@ const MusicPartitioner = () => {
           {/* Sheet music container */}
           <div className="flex items-start gap-4">
             {/* Strip names column */}
-            <div className="w-40 flex-shrink-0 relative" style={{ height: pageHeight }}>
-              <div className="text-sm font-medium text-gray-600 mb-2">Strip Names</div>
-              {strips.map((strip, index) => (
-                <div
-                  key={`name-${index}`}
-                  className="absolute flex items-center"
-                  style={{
-                    top: strip.start,
-                    height: strip.height,
-                    width: '100%'
-                  }}
-                >
-                  <input
-                    type="text"
-                    value={currentStripNames[index] || ''}
-                    onChange={(e) => updateStripName(index, e.target.value)}
-                    onBlur={() => handleStripNameBlur(index)}
-                    className="w-full bg-blue-600 text-white px-3 py-2 rounded-lg text-sm font-medium border-none outline-none focus:bg-blue-700 focus:ring-2 focus:ring-blue-300"
-                    style={{ cursor: 'text' }}
-                    onClick={(e) => e.stopPropagation()}
-                    placeholder={`Part ${index + 1}`}
-                  />
-                </div>
-              ))}
-            </div>
+            <StripNamesColumn
+              strips={strips}
+              stripNames={currentStripNames}
+              pageHeight={pageHeight}
+              onUpdateName={updateStripName}
+              onBlurName={handleStripNameBlur}
+            />
 
             {/* Sheet music */}
-            <div className="border-2 border-gray-200 rounded-lg overflow-hidden" style={{ width: pageWidth }}>
-              <div
-                ref={containerRef}
-                className={`relative bg-white select-none ${isSelectingHeader ? 'cursor-crosshair' : 'cursor-crosshair'}`}
-                style={{ width: pageWidth, height: pageHeight }}
-                onClick={handleContainerClick}
-                onMouseDown={handleRectMouseDown}
-              >
-                {/* Real page image from backend */}
-                {pageImageUrl && (
-                  <img
-                    src={pageImageUrl}
-                    alt={`Page ${currentPage + 1}`}
-                    style={{ width: pageWidth, height: pageHeight }}
-                    className="absolute inset-0"
-                    draggable={false}
-                  />
-                )}
-
-                {/* Dead zone overlays: above first, below last, and between systems */}
-                {currentDividers.length >= 2 && (() => {
-                  const zones = [];
-                  // Above first divider
-                  zones.push({ top: 0, height: currentDividers[0] });
-                  // Below last divider
-                  const last = currentDividers[currentDividers.length - 1];
-                  zones.push({ top: last, height: pageHeight - last });
-                  // Between systems: gap from a part divider to the next system divider
-                  for (let j = 0; j < currentDividers.length - 1; j++) {
-                    if (currentSystemDividers[j + 1]) {
-                      zones.push({
-                        top: currentDividers[j],
-                        height: currentDividers[j + 1] - currentDividers[j],
-                      });
-                    }
-                  }
-                  return zones.filter(z => z.height > 0).map((zone, i) => (
-                    <div
-                      key={`dead-${i}`}
-                      className="absolute bg-gray-500 bg-opacity-30 z-5"
-                      style={{ top: zone.top, left: 0, width: '100%', height: zone.height }}
-                    />
-                  ));
-                })()}
-
-                {/* Strip visualization */}
-                {strips.map((strip, index) => (
-                  <div
-                    key={index}
-                    className="absolute border-2 border-dashed border-blue-400 bg-blue-50 bg-opacity-20 group hover:bg-opacity-30 transition-colors"
-                    style={{
-                      top: strip.start,
-                      left: 0,
-                      width: '100%',
-                      height: strip.height
-                    }}
-                  >
-                    <div className="absolute top-1 left-2 bg-blue-600 text-white px-2 py-0.5 rounded text-xs opacity-70">
-                      {currentStripNames[index] || `Strip ${index + 1}`}
-                    </div>
-                    <div className="absolute top-2 right-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-xs opacity-0 group-hover:opacity-100 transition-opacity">
-                      {strip.height}px tall
-                    </div>
-                  </div>
-                ))}
-
-                {/* Draggable dividers */}
-                {currentDividers.map((y, index) => {
-                  const isSystem = !!currentSystemDividers[index];
-                  const lineClass = isSystem
-                    ? 'absolute w-full border-t-4 border-red-600 z-10'
-                    : 'absolute w-full border-t-2 border-blue-500 z-10';
-                  const handleClass = isSystem
-                    ? 'absolute w-8 h-8 bg-red-600 rounded-full cursor-ns-resize z-20 flex items-center justify-center hover:bg-red-700 transition-colors shadow-lg'
-                    : 'absolute w-8 h-8 bg-blue-500 rounded-full cursor-ns-resize z-20 flex items-center justify-center hover:bg-blue-600 transition-colors shadow-lg';
-                  const removeClass = isSystem
-                    ? 'absolute w-6 h-6 bg-red-600 rounded-full cursor-pointer z-20 flex items-center justify-center hover:bg-red-700 transition-colors text-white'
-                    : 'absolute w-6 h-6 bg-blue-500 rounded-full cursor-pointer z-20 flex items-center justify-center hover:bg-blue-600 transition-colors text-white';
-                  return (
-                  <div key={index}>
-                    {/* Divider line */}
-                    <div
-                      className={lineClass}
-                      style={{ top: y }}
-                    />
-
-                    {/* Draggable handle */}
-                    <div
-                      className={handleClass}
-                      style={{
-                        top: y - 16,
-                        left: pageWidth - 32
-                      }}
-                      onMouseDown={(e) => handleMouseDown(e, index)}
-                      onClick={(e) => e.stopPropagation()}
-                      title={isSystem ? 'System divider — drag to adjust' : 'Drag to adjust strip boundary'}
-                    >
-                      {isSystem
-                        ? <div className="w-4 h-0.5 bg-white" />
-                        : <div className="w-2 h-2 bg-white rounded-full" />
-                      }
-                    </div>
-
-                    {/* Remove button */}
-                    <button
-                      className={removeClass}
-                      style={{
-                        top: y - 12,
-                        left: pageWidth - 52
-                      }}
-                      onClick={(e) => { e.stopPropagation(); removeDivider(index); }}
-                      title="Remove this divider"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                  );
-                })}
-
-                {/* Rectangle selection preview (while dragging) */}
-                {rectPreview && rectPreview.w > 0 && rectPreview.h > 0 && (
-                  <div
-                    className={`absolute border-2 border-dashed bg-opacity-30 z-30 pointer-events-none ${
-                      isSelectingHeader ? 'border-green-500 bg-green-200' : 'border-amber-500 bg-amber-200'
-                    }`}
-                    style={{
-                      left: rectPreview.x,
-                      top: rectPreview.y,
-                      width: rectPreview.w,
-                      height: rectPreview.h,
-                    }}
-                  />
-                )}
-
-                {/* Header region overlay (finalized) */}
-                {headerRegion && currentPage === headerRegion.page && (
-                  <div
-                    className="absolute border-2 border-green-600 bg-green-200 bg-opacity-30 z-30"
-                    style={{
-                      left: headerRegion.x,
-                      top: headerRegion.y,
-                      width: headerRegion.w,
-                      height: headerRegion.h,
-                    }}
-                  >
-                    <div className="absolute top-1 left-2 bg-green-700 text-white px-2 py-0.5 rounded text-xs">
-                      Header
-                    </div>
-                    <button
-                      className="absolute top-1 right-1 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center hover:bg-red-600 transition-colors text-white z-40"
-                      onClick={(e) => { e.stopPropagation(); setHeaderRegion(null); }}
-                      title="Clear header"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                )}
-
-                {/* Marking overlays (finalized) */}
-                {markings.map((tm, idx) => tm.page === currentPage && (
-                  <div
-                    key={`tempo-${idx}`}
-                    className="absolute border-2 border-amber-500 bg-amber-200 bg-opacity-30 z-30"
-                    style={{
-                      left: tm.x,
-                      top: tm.y,
-                      width: tm.w,
-                      height: tm.h,
-                    }}
-                  >
-                    <div className="absolute top-1 left-2 bg-amber-600 text-white px-2 py-0.5 rounded text-xs">
-                      Marking
-                    </div>
-                    <button
-                      className="absolute top-1 right-1 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center hover:bg-red-600 transition-colors text-white z-40"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setMarkings(prev => prev.filter((_, j) => j !== idx));
-                      }}
-                      title="Remove marking"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <ScoreCanvas
+              pageWidth={pageWidth}
+              pageHeight={pageHeight}
+              pageImageUrl={pageImageUrl}
+              currentPage={currentPage}
+              dividers={currentDividers}
+              systemDividers={currentSystemDividers}
+              strips={strips}
+              stripNames={currentStripNames}
+              onRemoveDivider={removeDivider}
+              onDividerMouseDown={handleMouseDown}
+              onContainerClick={handleContainerClick}
+              onRectMouseDown={handleRectMouseDown}
+              rectPreview={rectPreview}
+              isSelectingHeader={isSelectingHeader}
+              headerRegion={headerRegion}
+              onClearHeader={() => setHeaderRegion(null)}
+              markings={markings}
+              onRemoveMarking={(idx) => setMarkings(prev => prev.filter((_, j) => j !== idx))}
+              containerRef={containerRef}
+              isRectSelecting={isRectSelecting}
+            />
           </div>
 
           {/* Page navigation */}
-          {scoreMetadata && scoreMetadata.page_count > 1 && (
-            <div className="mt-4 flex items-center justify-center gap-4">
-              <button
-                onClick={() => goToPage(currentPage - 1)}
-                disabled={currentPage === 0}
-                className="p-2 rounded-lg bg-gray-200 hover:bg-gray-300 disabled:opacity-30 transition-colors"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-
-              {/* Page dots */}
-              <div className="flex items-center gap-1.5">
-                {Array.from({ length: scoreMetadata.page_count }, (_, i) => (
-                  <button
-                    key={i}
-                    onClick={() => goToPage(i)}
-                    className={`w-3 h-3 rounded-full transition-colors ${
-                      i === currentPage
-                        ? 'bg-blue-600 ring-2 ring-blue-300'
-                        : confirmedPages.has(i)
-                          ? 'bg-green-500 hover:bg-green-600'
-                          : 'bg-gray-300 hover:bg-gray-400'
-                    }`}
-                    title={`Page ${i + 1}${confirmedPages.has(i) ? ' (confirmed)' : ''}`}
-                  />
-                ))}
-              </div>
-
-              <button
-                onClick={() => goToPage(currentPage + 1)}
-                disabled={currentPage === scoreMetadata.page_count - 1}
-                className="p-2 rounded-lg bg-gray-200 hover:bg-gray-300 disabled:opacity-30 transition-colors"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-
-              <span className="text-sm text-gray-600 ml-2">
-                Page {currentPage + 1} of {scoreMetadata.page_count}
-              </span>
-            </div>
-          )}
+          <PageNavigation
+            currentPage={currentPage}
+            pageCount={scoreMetadata?.page_count || 0}
+            confirmedPages={confirmedPages}
+            onGoToPage={goToPage}
+          />
 
           {/* Export results — download links */}
           {exportResult && (
-            <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
-              <h3 className="font-medium text-green-800 mb-2">Parts generated successfully:</h3>
-              <ul className="space-y-1">
-                {exportResult.map((part) => (
-                  <li key={part.name} className="flex items-center gap-2">
-                    <Download className="w-4 h-4 text-green-600" />
-                    <button
-                      onClick={async () => {
-                        const res = await fetch(`/api/scores/${scoreId}/parts/${encodeURIComponent(part.name)}`);
-                        if (!res.ok) { setError(`Download failed: ${res.status}`); return; }
-                        const blob = await res.blob();
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `${part.name}.pdf`;
-                        a.click();
-                        URL.revokeObjectURL(url);
-                      }}
-                      className="text-blue-600 hover:underline"
-                    >
-                      {part.name}.pdf
-                    </button>
-                    <span className="text-xs text-gray-500">
-                      ({part.staves_count} staves, {part.page_count} output pages)
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+            <ExportResults parts={exportResult} scoreId={scoreId} onError={setError} />
           )}
 
           {/* Status info */}
