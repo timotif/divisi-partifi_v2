@@ -91,6 +91,17 @@ coverage/
 ehthumbs.db
 Thumbs.db
 
+# AI assistants
+CLAUDE.md
+.claude/
+.cursorrules
+.cursor/
+.github/copilot-instructions.md
+.aider*
+.codeium/
+.continue/
+.windsurf/
+
 # Archives
 *.7z
 *.dmg

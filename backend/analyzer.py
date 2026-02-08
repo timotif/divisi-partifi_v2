@@ -1,4 +1,5 @@
 import os
+import re
 import cv2
 import numpy as np
 import pymupdf as fitz
@@ -24,34 +25,44 @@ def create_blank_page(width, height):
 	"""Create a blank page with the specified width and height."""
 	return np.ones((height, width), dtype=np.uint8) * 255  # White page
 
-def example():
-	staves_data = {} # Dictionary name: [y, h]
-	staves = {}
+def sanitize_string(value: str) -> str:
+	"""Sanitize user-provided strings for use in filenames and paths.
+	Strips path separators, null bytes, and non-printable characters.
+	"""
+	if value is None:
+		return None
+	value = value.replace('\x00', '').replace('/', '').replace('\\', '')
+	value = re.sub(r'[^\x20-\x7E]', '', value)
+	value = re.sub(r'\s+', ' ', value).strip()
+	return value[:128]
 
-	staves_data["fl"] = [100, 50]
-	staves_data["picc"] = [150, 40]
-	staves_data["EH"] = [190, 50]
+# def example():
+# 	staves_data = {} # Dictionary name: [y, h]
+# 	staves = {}
 
-	img = cv2.imread("./img/music.png")
-	img_gray = cv2.imread("./img/music.png", cv2.IMREAD_GRAYSCALE)
-	for staff in staves_data:
-		x, w = (0, img.shape[1])
-		y, h = staves_data[staff]
-		staves[staff] = crop_image(img_gray, x, y, w, h)
-		show(staves[staff], staff)
+# 	staves_data["fl"] = [100, 50]
+# 	staves_data["picc"] = [150, 40]
+# 	staves_data["EH"] = [190, 50]
+
+# 	img = cv2.imread("./img/music.png")
+# 	img_gray = cv2.imread("./img/music.png", cv2.IMREAD_GRAYSCALE)
+# 	for staff in staves_data:
+# 		x, w = (0, img.shape[1])
+# 		y, h = staves_data[staff]
+# 		staves[staff] = crop_image(img_gray, x, y, w, h)
+# 		show(staves[staff], staff)
 
 class Score:
 	def __init__(self, path: str, title: str = None, composer: str = None, keep_temp_files: bool = False):
 		self.keep_temp_files = keep_temp_files
-		self.name = f"{composer}_{title}"
+		self.title = sanitize_string(title)
+		self.composer = sanitize_string(composer)
+		self.name = f"{self.composer}_{self.title}"
 		self.path = path
-		self.title = title
-		self.composer = composer
-		# TODO: Sanitize path, title and composer
 		self.doc = self._load_pdf()
 		self.pages: list[Page] = []
 		self.parts: list[Part] = []
-		self.parts_dict: dict[str:Part] = {}
+		self.parts_dict: dict[str, Part] = {}
 	
 	def _load_pdf(self):
 		"""Load the PDF file and extract pages."""
@@ -86,7 +97,7 @@ class Page:
 	def __init__(self, score: Score = None):
 		self.score: Score = score
 		self.path: str = None
-		self.staves: Staff = []
+		self.staves: list[Staff] = []
 		self.img = None
 	
 	@classmethod
@@ -107,6 +118,13 @@ class Page:
 		page.img = cls._pixmap_to_numpy(pixmap)
 		return page
 
+	def to_png_bytes(self) -> bytes:
+		"""Encode the page image as PNG bytes for HTTP response."""
+		success, buffer = cv2.imencode('.png', self.img)
+		if not success:
+			raise PageError("Failed to encode page image as PNG")
+		return buffer.tobytes()
+
 	@staticmethod
 	def _pixmap_to_numpy(pixmap):
 		"""Convert a PyMuPDF pixmap to a NumPy array."""
@@ -120,13 +138,6 @@ class Page:
 			return np.frombuffer(samples, dtype=np.uint8).reshape(height, width)
 		else:  # RGB or RGBA
 			return np.frombuffer(samples, dtype=np.uint8).reshape(height, width, pixmap.n)
-			
-	# def _load_image(self, grayscale: bool):
-	# 	if self.path:
-	# 		return self._load_image_from_file(grayscale)
-	# 	elif not self.img:
-	# 		raise PageLoadError("No image path provided and no image loaded.")
-		
 
 class StaffError(Exception):
 	"""Base exception for Staff-related errors."""
@@ -169,7 +180,7 @@ class Part:
 	def __init__(self, name: str, short_name: str, staves: list[Staff]):
 		self.name = name
 		self.short_name = short_name
-		self.staves: Staff = staves
+		self.staves: list[Staff] = staves
 		self.pages = []
 		self.width = max([staff.img.shape[1] for staff in staves]) if staves else 0
 		self.spacing = 0
@@ -216,6 +227,8 @@ class Part:
 		self.available_height = self.height - self.margins['top'] - self.margins['bottom']
 
 	def process(self):
+		if self.staves:
+			self.width = max(staff.img.shape[1] for staff in self.staves)
 		self._layout(dpi=100)
 		# Create a blank page with the specified dimensions
 		page = create_blank_page(self.width, self.height)  # White page
@@ -233,7 +246,7 @@ class Part:
 			# If the page height is exceeded, create a new page
 			if y_pos + staff_img_resized.shape[0] > self.height - self.margins['bottom']:
 				self.pages.append(page)
-				page = np.ones((self.height, self.width), dtype=np.uint8) * 255
+				page = create_blank_page(self.width, self.height)
 				y_pos = self._reset_y_pos()
 		self.pages.append(page)
 
@@ -248,7 +261,7 @@ def example_page():
 
 def example_score():
 	try:
-		score = Score(SCORE_PATH, title= "Bella mia fiamma", composer="W. A. Mozart", keep_temp_files=False)
+		score = Score(SCORE_PATH, title= "Bella mia fiamma", composer="W. A. Mozart", keep_temp_files=True)
 		score._extract_pages()
 	except FileNotFoundError as e:
 		print(f"Error loading score: {e}")
@@ -296,8 +309,8 @@ def example():
 	for part in parts:
 		# print(f"Part: {part.name} has {len(part.staves)} staves")
 		part.process()
-		for i, page in enumerate(part.pages):
-			show(page, f"Part: {part.name} - Page {i+1}")
+		# for i, page in enumerate(part.pages):
+		# 	show(page, f"Part: {part.name} - Page {i+1}")
 
 TMP_DIR = os.path.join(os.path.dirname(__file__), "tmp")
 PAGE_PATH = "./img/music.png"
