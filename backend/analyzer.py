@@ -152,6 +152,8 @@ class Staff:
 		self.y = y
 		self.h = h
 		self.img = self._crop()
+		self.tempo_marks = []  # list of { 'img', 'y_offset', 'x_pos' }
+		self.source_page_width = None
 
 	def _crop(self):
 		if self.page is None:
@@ -244,6 +246,35 @@ class Part:
 			self.title_area = to_px(title_area_mm, dpi)
 		self.available_height = self.height - self.margins['top'] - self.margins['bottom']
 
+	def _paste_img_on_page(self, page, img, out_y, out_x):
+		"""Paste an image onto the output page, clamping to page bounds."""
+		page_h, page_w = page.shape[:2]
+		th, tw = img.shape[:2]
+		src_y0 = max(0, -out_y)
+		src_x0 = max(0, -out_x)
+		dst_y0 = max(0, out_y)
+		dst_x0 = max(0, out_x)
+		dst_y1 = min(page_h, out_y + th)
+		dst_x1 = min(page_w, out_x + tw)
+		src_y1 = src_y0 + (dst_y1 - dst_y0)
+		src_x1 = src_x0 + (dst_x1 - dst_x0)
+		if dst_y1 > dst_y0 and dst_x1 > dst_x0:
+			page[dst_y0:dst_y1, dst_x0:dst_x1] = img[src_y0:src_y1, src_x0:src_x1]
+
+	def _paste_tempo_marks(self, page, staff, staff_y_on_page):
+		"""Paste tempo markings just above a staff on the output page."""
+		if not staff.tempo_marks or not staff.source_page_width:
+			return
+		scale = self.available_width / staff.source_page_width
+		for mark in staff.tempo_marks:
+			scaled_img = self._scale_img(mark['img'], scale)
+			th, _ = scaled_img.shape[:2]
+			# Place just above the staff with a small gap
+			gap = max(4, int(self.spacing * 0.1))
+			out_y = staff_y_on_page - th - gap
+			out_x = self.margins['left'] + int(mark['x_pos'] * scale)
+			self._paste_img_on_page(page, scaled_img, out_y, out_x)
+
 	def process(self):
 		if self.staves:
 			self.width = max(staff.img.shape[1] for staff in self.staves)
@@ -259,14 +290,13 @@ class Part:
 			page[self.margins['top']:self.margins['top'] + sh, x_off:x_off + sw] = scaled
 		y_pos = self._reset_y_pos()
 		for staff in self.staves:
-			# Resize staff image to fit the page width respecting margins
-			# staff_img_resized = cv2.resize(staff.img, (self.width - self.margins['left'] - self.margins['right'], staff.img.shape[0]))
 			staff_img_resized = self._adapt_staff(staff)
-			# Check that the resized image fits within the page
-			if staff_img_resized.shape[1] > self.width - self.margins['left'] - self.margins['right']:
+			if staff_img_resized.shape[1] > self.available_width:
 				raise PartError(f"Staff image width exceeds page width: {staff.name}")
 			# Place the staff image on the page
 			page[y_pos:y_pos + staff_img_resized.shape[0], self.margins['left']:self.margins['left'] + staff_img_resized.shape[1]] = staff_img_resized
+			# Paste tempo markings relative to this staff's position
+			self._paste_tempo_marks(page, staff, y_pos)
 			y_pos += staff_img_resized.shape[0] + self.spacing
 			# If the page height is exceeded, create a new page
 			if y_pos + staff_img_resized.shape[0] > self.height - self.margins['bottom']:

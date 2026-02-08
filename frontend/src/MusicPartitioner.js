@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Music, Download, Plus, Trash2, Upload, ChevronLeft, ChevronRight, Type, X } from 'lucide-react';
+import { Music, Download, Plus, Trash2, Upload, ChevronLeft, ChevronRight, Type, X, Clock } from 'lucide-react';
 
 const MAX_DISPLAY_WIDTH = 600;
 
@@ -37,8 +37,14 @@ const MusicPartitioner = () => {
   // --- Header region: rectangle selection for piece title ---
   const [headerRegion, setHeaderRegion] = useState(null); // { page, x, y, w, h } in display pixels
   const [isSelectingHeader, setIsSelectingHeader] = useState(false);
-  const [headerDragStart, setHeaderDragStart] = useState(null); // { x, y } during drag
-  const [headerDragCurrent, setHeaderDragCurrent] = useState(null); // { x, y } during drag
+
+  // --- Tempo markings: multiple rectangle selections ---
+  const [tempoMarkings, setTempoMarkings] = useState([]); // [{ page, x, y, w, h }]
+  const [isSelectingTempo, setIsSelectingTempo] = useState(false);
+
+  // --- Shared rectangle drag state (used by header and tempo selection) ---
+  const [rectDragStart, setRectDragStart] = useState(null); // { x, y }
+  const [rectDragCurrent, setRectDragCurrent] = useState(null); // { x, y }
 
   // --- UI state ---
   const [dragIndex, setDragIndex] = useState(-1);
@@ -295,68 +301,76 @@ const MusicPartitioner = () => {
     addDividerAtY(newY, false);
   };
 
+  const isRectSelecting = isSelectingHeader || isSelectingTempo;
+
   const handleContainerClick = (e) => {
-    // Don't add divider if we were dragging or selecting header
-    if (dragIndex !== -1 || isSelectingHeader) return;
+    // Don't add divider if we were dragging or in rect selection mode
+    if (dragIndex !== -1 || isRectSelecting) return;
     const rect = containerRef.current.getBoundingClientRect();
     const clickY = e.clientY - rect.top;
     // Shift+click = system divider, regular click = part divider
     addDividerAtY(clickY, e.shiftKey);
   };
 
-  // --- Header selection drag handlers ---
-  const handleHeaderMouseDown = (e) => {
-    if (!isSelectingHeader) return;
+  // --- Shared rectangle selection drag handlers ---
+  const handleRectMouseDown = (e) => {
+    if (!isRectSelecting) return;
     e.preventDefault();
     const rect = containerRef.current.getBoundingClientRect();
     const start = {
       x: Math.max(0, Math.min(e.clientX - rect.left, pageWidth)),
       y: Math.max(0, Math.min(e.clientY - rect.top, pageHeight)),
     };
-    setHeaderDragStart(start);
-    setHeaderDragCurrent(start);
+    setRectDragStart(start);
+    setRectDragCurrent(start);
   };
 
-  const handleHeaderMouseMove = useCallback((e) => {
-    if (!headerDragStart) return;
+  const handleRectMouseMove = useCallback((e) => {
+    if (!rectDragStart) return;
     const rect = containerRef.current.getBoundingClientRect();
-    setHeaderDragCurrent({
+    setRectDragCurrent({
       x: Math.max(0, Math.min(e.clientX - rect.left, pageWidth)),
       y: Math.max(0, Math.min(e.clientY - rect.top, pageHeight)),
     });
-  }, [headerDragStart, pageWidth, pageHeight]);
+  }, [rectDragStart, pageWidth, pageHeight]);
 
-  const handleHeaderMouseUp = useCallback(() => {
-    if (!headerDragStart || !headerDragCurrent) return;
-    const x = Math.min(headerDragStart.x, headerDragCurrent.x);
-    const y = Math.min(headerDragStart.y, headerDragCurrent.y);
-    const w = Math.abs(headerDragCurrent.x - headerDragStart.x);
-    const h = Math.abs(headerDragCurrent.y - headerDragStart.y);
+  const handleRectMouseUp = useCallback(() => {
+    if (!rectDragStart || !rectDragCurrent) return;
+    const x = Math.min(rectDragStart.x, rectDragCurrent.x);
+    const y = Math.min(rectDragStart.y, rectDragCurrent.y);
+    const w = Math.abs(rectDragCurrent.x - rectDragStart.x);
+    const h = Math.abs(rectDragCurrent.y - rectDragStart.y);
     if (w > 5 && h > 5) {
-      setHeaderRegion({ page: currentPage, x, y, w, h });
+      const region = { page: currentPage, x, y, w, h };
+      if (isSelectingHeader) {
+        setHeaderRegion(region);
+        setIsSelectingHeader(false);
+      } else if (isSelectingTempo) {
+        setTempoMarkings(prev => [...prev, region]);
+        setIsSelectingTempo(false);
+      }
     }
-    setHeaderDragStart(null);
-    setHeaderDragCurrent(null);
-    setIsSelectingHeader(false);
-  }, [headerDragStart, headerDragCurrent, currentPage]);
+    setRectDragStart(null);
+    setRectDragCurrent(null);
+  }, [rectDragStart, rectDragCurrent, currentPage, isSelectingHeader, isSelectingTempo]);
 
   useEffect(() => {
-    if (headerDragStart) {
-      document.addEventListener('mousemove', handleHeaderMouseMove);
-      document.addEventListener('mouseup', handleHeaderMouseUp);
+    if (rectDragStart) {
+      document.addEventListener('mousemove', handleRectMouseMove);
+      document.addEventListener('mouseup', handleRectMouseUp);
       return () => {
-        document.removeEventListener('mousemove', handleHeaderMouseMove);
-        document.removeEventListener('mouseup', handleHeaderMouseUp);
+        document.removeEventListener('mousemove', handleRectMouseMove);
+        document.removeEventListener('mouseup', handleRectMouseUp);
       };
     }
-  }, [headerDragStart, handleHeaderMouseMove, handleHeaderMouseUp]);
+  }, [rectDragStart, handleRectMouseMove, handleRectMouseUp]);
 
   // Compute the preview rect from drag start/current
-  const headerPreviewRect = headerDragStart && headerDragCurrent ? {
-    x: Math.min(headerDragStart.x, headerDragCurrent.x),
-    y: Math.min(headerDragStart.y, headerDragCurrent.y),
-    w: Math.abs(headerDragCurrent.x - headerDragStart.x),
-    h: Math.abs(headerDragCurrent.y - headerDragStart.y),
+  const rectPreview = rectDragStart && rectDragCurrent ? {
+    x: Math.min(rectDragStart.x, rectDragCurrent.x),
+    y: Math.min(rectDragStart.y, rectDragCurrent.y),
+    w: Math.abs(rectDragCurrent.x - rectDragStart.x),
+    h: Math.abs(rectDragCurrent.y - rectDragStart.y),
   } : null;
 
   const removeDivider = (index) => {
@@ -506,6 +520,7 @@ const MusicPartitioner = () => {
         body: JSON.stringify({
           display_width: MAX_DISPLAY_WIDTH,
           ...(headerRegion ? { header: headerRegion } : {}),
+          ...(tempoMarkings.length > 0 ? { tempo_markings: tempoMarkings } : {}),
           pages: pagesPayload,
         }),
       });
@@ -590,14 +605,14 @@ const MusicPartitioner = () => {
               </button>
               <button
                 onClick={addDivider}
-                disabled={isSelectingHeader}
+                disabled={isRectSelecting}
                 className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
               >
                 <Plus className="w-4 h-4" />
                 Add Divider
               </button>
               <button
-                onClick={() => setIsSelectingHeader(!isSelectingHeader)}
+                onClick={() => { setIsSelectingHeader(!isSelectingHeader); setIsSelectingTempo(false); }}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
                   isSelectingHeader
                     ? 'bg-green-700 text-white ring-2 ring-green-300'
@@ -614,6 +629,28 @@ const MusicPartitioner = () => {
                   onClick={() => setHeaderRegion(null)}
                   className="flex items-center gap-1 px-3 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
                   title="Clear header selection"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+              <button
+                onClick={() => { setIsSelectingTempo(!isSelectingTempo); setIsSelectingHeader(false); }}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                  isSelectingTempo
+                    ? 'bg-amber-700 text-white ring-2 ring-amber-300'
+                    : tempoMarkings.length > 0
+                      ? 'bg-amber-600 text-white hover:bg-amber-700'
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                <Clock className="w-4 h-4" />
+                {isSelectingTempo ? 'Draw Tempo...' : tempoMarkings.length > 0 ? `Tempo (${tempoMarkings.length})` : 'Select Tempo'}
+              </button>
+              {tempoMarkings.length > 0 && !isSelectingTempo && (
+                <button
+                  onClick={() => setTempoMarkings([])}
+                  className="flex items-center gap-1 px-3 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
+                  title="Clear all tempo markings"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -675,7 +712,7 @@ const MusicPartitioner = () => {
                 className={`relative bg-white select-none ${isSelectingHeader ? 'cursor-crosshair' : 'cursor-crosshair'}`}
                 style={{ width: pageWidth, height: pageHeight }}
                 onClick={handleContainerClick}
-                onMouseDown={handleHeaderMouseDown}
+                onMouseDown={handleRectMouseDown}
               >
                 {/* Real page image from backend */}
                 {pageImageUrl && (
@@ -788,15 +825,17 @@ const MusicPartitioner = () => {
                   );
                 })}
 
-                {/* Header selection preview (while dragging) */}
-                {headerPreviewRect && headerPreviewRect.w > 0 && headerPreviewRect.h > 0 && (
+                {/* Rectangle selection preview (while dragging) */}
+                {rectPreview && rectPreview.w > 0 && rectPreview.h > 0 && (
                   <div
-                    className="absolute border-2 border-dashed border-green-500 bg-green-200 bg-opacity-30 z-30 pointer-events-none"
+                    className={`absolute border-2 border-dashed bg-opacity-30 z-30 pointer-events-none ${
+                      isSelectingHeader ? 'border-green-500 bg-green-200' : 'border-amber-500 bg-amber-200'
+                    }`}
                     style={{
-                      left: headerPreviewRect.x,
-                      top: headerPreviewRect.y,
-                      width: headerPreviewRect.w,
-                      height: headerPreviewRect.h,
+                      left: rectPreview.x,
+                      top: rectPreview.y,
+                      width: rectPreview.w,
+                      height: rectPreview.h,
                     }}
                   />
                 )}
@@ -824,6 +863,34 @@ const MusicPartitioner = () => {
                     </button>
                   </div>
                 )}
+
+                {/* Tempo marking overlays (finalized) */}
+                {tempoMarkings.map((tm, idx) => tm.page === currentPage && (
+                  <div
+                    key={`tempo-${idx}`}
+                    className="absolute border-2 border-amber-500 bg-amber-200 bg-opacity-30 z-30"
+                    style={{
+                      left: tm.x,
+                      top: tm.y,
+                      width: tm.w,
+                      height: tm.h,
+                    }}
+                  >
+                    <div className="absolute top-1 left-2 bg-amber-600 text-white px-2 py-0.5 rounded text-xs">
+                      Tempo
+                    </div>
+                    <button
+                      className="absolute top-1 right-1 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center hover:bg-red-600 transition-colors text-white z-40"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTempoMarkings(prev => prev.filter((_, j) => j !== idx));
+                      }}
+                      title="Remove tempo marking"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
           </div>

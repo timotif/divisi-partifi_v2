@@ -158,6 +158,25 @@ def _resolve_strip_names(real_strips: list[dict]) -> None:
 			s['name'] = known[seq_idx % len(known)]
 
 
+def _group_strips_by_system(real_strips: list[dict]) -> list[list[dict]]:
+	"""Group a page's real strips into systems based on is_system_start flags."""
+	systems: list[list[dict]] = []
+	for strip in real_strips:
+		if strip['is_system_start'] or not systems:
+			systems.append([])
+		systems[-1].append(strip)
+	return systems
+
+
+def _convert_rect_to_backend(rect: dict, scale: float, img_width: int, img_height: int) -> dict:
+	"""Convert a display-pixel rect to backend-pixel rect, clamped to image bounds."""
+	bx = min(max(round(rect['x'] / scale), 0), img_width)
+	by = min(max(round(rect['y'] / scale), 0), img_height)
+	bw = min(round(rect['w'] / scale), img_width - bx)
+	bh = min(round(rect['h'] / scale), img_height - by)
+	return {'x': bx, 'y': by, 'w': bw, 'h': bh}
+
+
 @app.route('/api/scores/<score_id>/partition', methods=['POST'])
 def partition_score(score_id: str):
 	"""Accept raw user annotations and create staves and parts.
@@ -262,6 +281,7 @@ def partition_score(score_id: str):
 					h=strip['h'],
 					page=page,
 				)
+				staff.source_page_width = page.img.shape[1]
 				page.staves.append(staff)
 				part.staves.append(staff)
 	except StaffError as e:
@@ -279,15 +299,62 @@ def partition_score(score_id: str):
 		h_img = score.pages[h_page].img
 		h_height, h_width = h_img.shape[:2]
 		h_scale = display_width / h_width
-		bx = min(max(round(header_data['x'] / h_scale), 0), h_width)
-		by = min(max(round(header_data['y'] / h_scale), 0), h_height)
-		bw = min(round(header_data['w'] / h_scale), h_width - bx)
-		bh = min(round(header_data['h'] / h_scale), h_height - by)
-		if bw > 0 and bh > 0:
-			header_crop = h_img[by:by + bh, bx:bx + bw].copy()
+		br = _convert_rect_to_backend(header_data, h_scale, h_width, h_height)
+		if br['w'] > 0 and br['h'] > 0:
+			header_crop = h_img[br['y']:br['y'] + br['h'], br['x']:br['x'] + br['w']].copy()
 			for part in parts_list:
 				part.header_img = header_crop
 				part.header_source_width = h_width
+
+	# --- Phase 3c: Attach tempo markings to staves ---
+	tempo_data = data.get('tempo_markings', [])
+	for tm in tempo_data:
+		t_page_idx = tm.get('page', 0)
+		if t_page_idx < 0 or t_page_idx >= len(score.pages):
+			continue
+		page = score.pages[t_page_idx]
+		t_img = page.img
+		t_height, t_width = t_img.shape[:2]
+		t_scale = display_width / t_width
+
+		br = _convert_rect_to_backend(tm, t_scale, t_width, t_height)
+		if br['w'] <= 0 or br['h'] <= 0:
+			continue
+		tempo_crop = t_img[br['y']:br['y'] + br['h'], br['x']:br['x'] + br['w']].copy()
+
+		# Find which system this tempo marking belongs to
+		if t_page_idx not in all_real_strips:
+			continue
+		systems = _group_strips_by_system(all_real_strips[t_page_idx])
+		tempo_y_center = br['y'] + br['h'] // 2
+
+		target_system = None
+		for system in systems:
+			sys_top = system[0]['y']
+			sys_bottom = system[-1]['y'] + system[-1]['h']
+			if tempo_y_center <= sys_bottom:
+				target_system = system
+				break
+		if target_system is None:
+			target_system = systems[-1] if systems else None
+		if target_system is None:
+			continue
+
+		# Attach to every staff in this system EXCEPT the first
+		# (the first staff already contains the tempo marking in its cropped image).
+		# Place it just above the staff on the output page.
+		first_strip_id = id(target_system[0])
+		sys_strip_set = {id(s) for s in target_system}
+		strip_idx = 0
+		for staff in page.staves:
+			if strip_idx < len(all_real_strips[t_page_idx]):
+				strip = all_real_strips[t_page_idx][strip_idx]
+				if id(strip) in sys_strip_set and id(strip) != first_strip_id:
+					staff.tempo_marks.append({
+						'img': tempo_crop,
+						'x_pos': br['x'],
+					})
+				strip_idx += 1
 
 	# --- Phase 4: Process each part (layout onto output pages) ---
 	try:
