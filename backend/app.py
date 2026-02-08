@@ -179,7 +179,7 @@ def _convert_rect_to_backend(rect: dict, scale: float, img_width: int, img_heigh
 
 @app.route('/api/scores/<score_id>/partition', methods=['POST'])
 def partition_score(score_id: str):
-	"""Accept raw user annotations and create staves and parts.
+	"""Accept raw user markings and create staves and parts.
 
 	The frontend sends divider positions in display-pixel space along with
 	system flags and strip names. The backend handles coordinate conversion,
@@ -306,33 +306,33 @@ def partition_score(score_id: str):
 				part.header_img = header_crop
 				part.header_source_width = h_width
 
-	# --- Phase 3c: Attach tempo markings to staves ---
-	tempo_data = data.get('tempo_markings', [])
-	for tm in tempo_data:
-		t_page_idx = tm.get('page', 0)
-		if t_page_idx < 0 or t_page_idx >= len(score.pages):
+	# --- Phase 3c: Attach score markings (tempo, etc.) to staves ---
+	markings_data = data.get('markings', [])
+	for ann_rect in markings_data:
+		ann_page_idx = ann_rect.get('page', 0)
+		if ann_page_idx < 0 or ann_page_idx >= len(score.pages):
 			continue
-		page = score.pages[t_page_idx]
-		t_img = page.img
-		t_height, t_width = t_img.shape[:2]
-		t_scale = display_width / t_width
+		page = score.pages[ann_page_idx]
+		ann_img = page.img
+		ann_h, ann_w = ann_img.shape[:2]
+		ann_scale = display_width / ann_w
 
-		br = _convert_rect_to_backend(tm, t_scale, t_width, t_height)
+		br = _convert_rect_to_backend(ann_rect, ann_scale, ann_w, ann_h)
 		if br['w'] <= 0 or br['h'] <= 0:
 			continue
-		tempo_crop = t_img[br['y']:br['y'] + br['h'], br['x']:br['x'] + br['w']].copy()
+		crop = ann_img[br['y']:br['y'] + br['h'], br['x']:br['x'] + br['w']].copy()
 
-		# Find which system this tempo marking belongs to
-		if t_page_idx not in all_real_strips:
+		# Find which system this marking belongs to
+		if ann_page_idx not in all_real_strips:
 			continue
-		systems = _group_strips_by_system(all_real_strips[t_page_idx])
-		tempo_y_center = br['y'] + br['h'] // 2
+		systems = _group_strips_by_system(all_real_strips[ann_page_idx])
+		ann_y_center = br['y'] + br['h'] // 2
 
 		target_system = None
 		for system in systems:
 			sys_top = system[0]['y']
 			sys_bottom = system[-1]['y'] + system[-1]['h']
-			if tempo_y_center <= sys_bottom:
+			if ann_y_center <= sys_bottom:
 				target_system = system
 				break
 		if target_system is None:
@@ -340,19 +340,27 @@ def partition_score(score_id: str):
 		if target_system is None:
 			continue
 
-		# Attach to every staff in this system EXCEPT the first
-		# (the first staff already contains the tempo marking in its cropped image).
-		# Place it just above the staff on the output page.
-		first_strip_id = id(target_system[0])
+		first_strip = target_system[0]
+		inside_first = (
+			br['y'] >= first_strip['y']
+			and br['y'] + br['h'] <= first_strip['y'] + first_strip['h']
+		)
+		y_offset = br['y'] - first_strip['y']
+
+		# Attach to every staff in this system
+		first_strip_id = id(first_strip)
 		sys_strip_set = {id(s) for s in target_system}
 		strip_idx = 0
 		for staff in page.staves:
-			if strip_idx < len(all_real_strips[t_page_idx]):
-				strip = all_real_strips[t_page_idx][strip_idx]
-				if id(strip) in sys_strip_set and id(strip) != first_strip_id:
-					staff.tempo_marks.append({
-						'img': tempo_crop,
+			if strip_idx < len(all_real_strips[ann_page_idx]):
+				strip = all_real_strips[ann_page_idx][strip_idx]
+				if id(strip) in sys_strip_set:
+					staff.markings.append({
+						'img': crop,
 						'x_pos': br['x'],
+						'y_offset': y_offset,
+						'inside_first': inside_first,
+						'is_first_in_system': id(strip) == first_strip_id,
 					})
 				strip_idx += 1
 

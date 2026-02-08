@@ -152,7 +152,7 @@ class Staff:
 		self.y = y
 		self.h = h
 		self.img = self._crop()
-		self.tempo_marks = []  # list of { 'img', 'y_offset', 'x_pos' }
+		self.markings = []  # list of { 'img', 'x_pos', 'y_offset', 'inside_first', 'is_first_in_system' }
 		self.source_page_width = None
 
 	def _crop(self):
@@ -261,18 +261,33 @@ class Part:
 		if dst_y1 > dst_y0 and dst_x1 > dst_x0:
 			page[dst_y0:dst_y1, dst_x0:dst_x1] = img[src_y0:src_y1, src_x0:src_x1]
 
-	def _paste_tempo_marks(self, page, staff, staff_y_on_page):
-		"""Paste tempo markings just above a staff on the output page."""
-		if not staff.tempo_marks or not staff.source_page_width:
+	def _paste_markings(self, page, staff, staff_y_on_page):
+		"""Paste score markings (tempo, recitativo, etc.) onto the output page.
+
+		Two placement modes based on whether the marking was inside the
+		first strip of its system in the source score:
+		- inside_first + is_first_in_system: skip (already in the staff crop)
+		- inside_first + not first: paste just above the staff, stacking upward
+		- not inside_first: paste at the same Y offset from staff top on all staves
+		"""
+		if not staff.markings or not staff.source_page_width:
 			return
 		scale = self.available_width / staff.source_page_width
-		for mark in staff.tempo_marks:
-			scaled_img = self._scale_img(mark['img'], scale)
-			th, _ = scaled_img.shape[:2]
-			# Place just above the staff with a small gap
-			gap = max(4, int(self.spacing * 0.1))
-			out_y = staff_y_on_page - th - gap
-			out_x = self.margins['left'] + int(mark['x_pos'] * scale)
+		gap = max(4, int(self.spacing * 0.1))
+		ceiling = staff_y_on_page  # tracks the top of the pasted area above the staff
+		for ann in staff.markings:
+			if ann['inside_first'] and ann['is_first_in_system']:
+				continue  # already present in the cropped staff image
+			scaled_img = self._scale_img(ann['img'], scale)
+			out_x = self.margins['left'] + int(ann['x_pos'] * scale)
+			if ann['inside_first']:
+				# Stack above the staff, moving the ceiling upward
+				th = scaled_img.shape[0]
+				ceiling -= th + gap
+				out_y = ceiling
+			else:
+				# Preserve relative Y position from the first strip's top
+				out_y = staff_y_on_page + int(ann['y_offset'] * scale)
 			self._paste_img_on_page(page, scaled_img, out_y, out_x)
 
 	def process(self):
@@ -295,8 +310,8 @@ class Part:
 				raise PartError(f"Staff image width exceeds page width: {staff.name}")
 			# Place the staff image on the page
 			page[y_pos:y_pos + staff_img_resized.shape[0], self.margins['left']:self.margins['left'] + staff_img_resized.shape[1]] = staff_img_resized
-			# Paste tempo markings relative to this staff's position
-			self._paste_tempo_marks(page, staff, y_pos)
+			# Paste markings (tempo, etc.) relative to this staff's position
+			self._paste_markings(page, staff, y_pos)
 			y_pos += staff_img_resized.shape[0] + self.spacing
 			# If the page height is exceeded, create a new page
 			if y_pos + staff_img_resized.shape[0] > self.height - self.margins['bottom']:

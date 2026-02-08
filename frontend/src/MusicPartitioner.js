@@ -38,9 +38,9 @@ const MusicPartitioner = () => {
   const [headerRegion, setHeaderRegion] = useState(null); // { page, x, y, w, h } in display pixels
   const [isSelectingHeader, setIsSelectingHeader] = useState(false);
 
-  // --- Tempo markings: multiple rectangle selections ---
-  const [tempoMarkings, setTempoMarkings] = useState([]); // [{ page, x, y, w, h }]
-  const [isSelectingTempo, setIsSelectingTempo] = useState(false);
+  // --- Score markings: multiple rectangle selections ---
+  const [markings, setMarkings] = useState([]); // [{ page, x, y, w, h }]
+  const [isSelectingMarking, setIsSelectingMarking] = useState(false);
 
   // --- Shared rectangle drag state (used by header and tempo selection) ---
   const [rectDragStart, setRectDragStart] = useState(null); // { x, y }
@@ -301,11 +301,17 @@ const MusicPartitioner = () => {
     addDividerAtY(newY, false);
   };
 
-  const isRectSelecting = isSelectingHeader || isSelectingTempo;
+  const isRectSelecting = isSelectingHeader || isSelectingMarking;
+
+  const suppressNextClick = useRef(false);
 
   const handleContainerClick = (e) => {
-    // Don't add divider if we were dragging or in rect selection mode
-    if (dragIndex !== -1 || isRectSelecting) return;
+    // Don't add divider if we were dragging, in rect selection mode,
+    // or if a rect drag just finished (mouseup resets the mode before click fires)
+    if (dragIndex !== -1 || isRectSelecting || suppressNextClick.current) {
+      suppressNextClick.current = false;
+      return;
+    }
     const rect = containerRef.current.getBoundingClientRect();
     const clickY = e.clientY - rect.top;
     // Shift+click = system divider, regular click = part divider
@@ -336,6 +342,7 @@ const MusicPartitioner = () => {
 
   const handleRectMouseUp = useCallback(() => {
     if (!rectDragStart || !rectDragCurrent) return;
+    suppressNextClick.current = true;
     const x = Math.min(rectDragStart.x, rectDragCurrent.x);
     const y = Math.min(rectDragStart.y, rectDragCurrent.y);
     const w = Math.abs(rectDragCurrent.x - rectDragStart.x);
@@ -345,14 +352,14 @@ const MusicPartitioner = () => {
       if (isSelectingHeader) {
         setHeaderRegion(region);
         setIsSelectingHeader(false);
-      } else if (isSelectingTempo) {
-        setTempoMarkings(prev => [...prev, region]);
-        setIsSelectingTempo(false);
+      } else if (isSelectingMarking) {
+        setMarkings(prev => [...prev, region]);
+        setIsSelectingMarking(false);
       }
     }
     setRectDragStart(null);
     setRectDragCurrent(null);
-  }, [rectDragStart, rectDragCurrent, currentPage, isSelectingHeader, isSelectingTempo]);
+  }, [rectDragStart, rectDragCurrent, currentPage, isSelectingHeader, isSelectingMarking]);
 
   useEffect(() => {
     if (rectDragStart) {
@@ -482,7 +489,7 @@ const MusicPartitioner = () => {
     setPhase('exporting');
     setError(null);
 
-    // Send raw annotations — the backend handles coordinate conversion,
+    // Send raw markings — the backend handles coordinate conversion,
     // dead-space filtering, auto-fill, and part deduplication.
     const pagesPayload = {};
     for (let i = 0; i < scoreMetadata.page_count; i++) {
@@ -520,7 +527,7 @@ const MusicPartitioner = () => {
         body: JSON.stringify({
           display_width: MAX_DISPLAY_WIDTH,
           ...(headerRegion ? { header: headerRegion } : {}),
-          ...(tempoMarkings.length > 0 ? { tempo_markings: tempoMarkings } : {}),
+          ...(markings.length > 0 ? { markings } : {}),
           pages: pagesPayload,
         }),
       });
@@ -612,7 +619,7 @@ const MusicPartitioner = () => {
                 Add Divider
               </button>
               <button
-                onClick={() => { setIsSelectingHeader(!isSelectingHeader); setIsSelectingTempo(false); }}
+                onClick={() => { setIsSelectingHeader(!isSelectingHeader); setIsSelectingMarking(false); }}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
                   isSelectingHeader
                     ? 'bg-green-700 text-white ring-2 ring-green-300'
@@ -634,23 +641,23 @@ const MusicPartitioner = () => {
                 </button>
               )}
               <button
-                onClick={() => { setIsSelectingTempo(!isSelectingTempo); setIsSelectingHeader(false); }}
+                onClick={() => { setIsSelectingMarking(!isSelectingMarking); setIsSelectingHeader(false); }}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                  isSelectingTempo
+                  isSelectingMarking
                     ? 'bg-amber-700 text-white ring-2 ring-amber-300'
-                    : tempoMarkings.length > 0
+                    : markings.length > 0
                       ? 'bg-amber-600 text-white hover:bg-amber-700'
                       : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                 }`}
               >
                 <Clock className="w-4 h-4" />
-                {isSelectingTempo ? 'Draw Tempo...' : tempoMarkings.length > 0 ? `Tempo (${tempoMarkings.length})` : 'Select Tempo'}
+                {isSelectingMarking ? 'Draw Marking...' : markings.length > 0 ? `Marking (${markings.length})` : 'Select Marking'}
               </button>
-              {tempoMarkings.length > 0 && !isSelectingTempo && (
+              {markings.length > 0 && !isSelectingMarking && (
                 <button
-                  onClick={() => setTempoMarkings([])}
+                  onClick={() => setMarkings([])}
                   className="flex items-center gap-1 px-3 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
-                  title="Clear all tempo markings"
+                  title="Clear all markings"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -864,8 +871,8 @@ const MusicPartitioner = () => {
                   </div>
                 )}
 
-                {/* Tempo marking overlays (finalized) */}
-                {tempoMarkings.map((tm, idx) => tm.page === currentPage && (
+                {/* Marking overlays (finalized) */}
+                {markings.map((tm, idx) => tm.page === currentPage && (
                   <div
                     key={`tempo-${idx}`}
                     className="absolute border-2 border-amber-500 bg-amber-200 bg-opacity-30 z-30"
@@ -877,15 +884,15 @@ const MusicPartitioner = () => {
                     }}
                   >
                     <div className="absolute top-1 left-2 bg-amber-600 text-white px-2 py-0.5 rounded text-xs">
-                      Tempo
+                      Marking
                     </div>
                     <button
                       className="absolute top-1 right-1 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center hover:bg-red-600 transition-colors text-white z-40"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setTempoMarkings(prev => prev.filter((_, j) => j !== idx));
+                        setMarkings(prev => prev.filter((_, j) => j !== idx));
                       }}
-                      title="Remove tempo marking"
+                      title="Remove marking"
                     >
                       <X className="w-3 h-3" />
                     </button>
