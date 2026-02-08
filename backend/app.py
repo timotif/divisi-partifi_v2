@@ -121,16 +121,11 @@ def serve_page(score_id: str, page_num: int):
 	return send_file(io.BytesIO(png_bytes), mimetype='image/png')
 
 
-def _resolve_strip_names(real_strips: list[dict]) -> None:
-	"""Fill empty strip names by cycling the known instrument sequence.
+def _build_known_sequence(real_strips: list[dict]) -> list[str]:
+	"""Extract the known instrument sequence from a page's first system.
 
-	Mutates strip dicts in-place. The known sequence is built from
-	consecutive unique non-empty names starting at strip 0, stopping at the
-	first repeat, empty name, or system divider boundary. The cycle resets
-	at each system divider.
-
-	Mirrors the frontend autoFillStripNames logic so the backend can serve
-	as the authoritative fallback for any unnamed strips.
+	Returns consecutive unique non-empty names from strip 0, stopping at
+	the first repeat, empty name, or system divider boundary.
 	"""
 	known: list[str] = []
 	seen: set[str] = set()
@@ -142,20 +137,51 @@ def _resolve_strip_names(real_strips: list[dict]) -> None:
 			break
 		seen.add(name)
 		known.append(name)
+	return known
 
-	if not known:
-		for i, s in enumerate(real_strips):
-			if not s['name']:
-				s['name'] = f"Part {i + 1}"
-		return
 
-	seq_idx = -1
+def _fill_page_with_sequence(real_strips: list[dict], known: list[str]) -> None:
+	"""Fill empty strip names on a page using a known sequence, cycling and
+	resetting at system dividers. For non-empty names, sync the sequence
+	position so subsequent fills continue correctly."""
+	seq_idx = 0
 	for s in real_strips:
 		if s['is_system_start']:
-			seq_idx = -1
-		seq_idx += 1
+			seq_idx = 0
 		if not s['name']:
 			s['name'] = known[seq_idx % len(known)]
+			seq_idx += 1
+		else:
+			pos = known.index(s['name']) if s['name'] in known else -1
+			seq_idx = pos + 1 if pos != -1 else seq_idx + 1
+
+
+def _resolve_strip_names_globally(all_real_strips: dict[int, list[dict]]) -> None:
+	"""Fill empty strip names across ALL pages using a global known sequence.
+
+	Scans pages in order to find the first page with a complete instrument
+	sequence, then uses it to fill unnamed strips on every page. Falls back
+	to per-page "Part N" numbering if no page has named strips.
+	"""
+	# Build global known sequence from the first page that has one
+	known: list[str] = []
+	for page_idx in sorted(all_real_strips.keys()):
+		seq = _build_known_sequence(all_real_strips[page_idx])
+		if seq:
+			known = seq
+			break
+
+	if not known:
+		# No named strips anywhere — fallback to generic names
+		for real_strips in all_real_strips.values():
+			for i, s in enumerate(real_strips):
+				if not s['name']:
+					s['name'] = f"Part {i + 1}"
+		return
+
+	# Apply global sequence to all pages
+	for real_strips in all_real_strips.values():
+		_fill_page_with_sequence(real_strips, known)
 
 
 def _group_strips_by_system(real_strips: list[dict]) -> list[list[dict]]:
@@ -247,9 +273,8 @@ def partition_score(score_id: str):
 
 		all_real_strips[page_idx] = real_strips
 
-	# --- Phase 2: Resolve empty strip names (auto-fill fallback) ---
-	for real_strips in all_real_strips.values():
-		_resolve_strip_names(real_strips)
+	# --- Phase 2: Resolve empty strip names (cross-page auto-fill) ---
+	_resolve_strip_names_globally(all_real_strips)
 
 	# --- Phase 3: Deduplicate parts, create Staff/Part objects ---
 	score.parts = []
@@ -364,16 +389,105 @@ def partition_score(score_id: str):
 					})
 				strip_idx += 1
 
-	# --- Phase 4: Process each part (layout onto output pages) ---
+	# --- Phase 4: Compute preview metadata (no rendering yet) ---
+	score.parts = parts_list
+	score.parts_dict = parts_dict
+
+	preview_parts = []
 	try:
 		for part in parts_list:
 			if part.staves:
-				part.process()
+				preview_parts.append(part.preview_metadata())
+	except PartError as e:
+		abort(500, description=f"Preview metadata failed: {e}")
+
+	return jsonify({"parts": preview_parts})
+
+
+@app.route('/api/scores/<score_id>/staves/<part_name>/<int:stave_index>', methods=['GET'])
+def serve_stave_image(score_id: str, part_name: str, stave_index: int):
+	"""Serve a single stave image (scaled to the part's output width) as PNG."""
+	entry = _validate_score_id(score_id)
+	score = entry["score"]
+
+	if not score.parts_dict:
+		abort(404, description="No parts available. Run partition first.")
+
+	part = score.parts_dict.get(part_name)
+	if not part:
+		abort(404, description=f"Part '{part_name}' not found")
+
+	if stave_index < 0 or stave_index >= len(part.staves):
+		abort(404, description=f"Stave index {stave_index} out of range")
+
+	# Ensure layout has been computed (preview_metadata sets this up)
+	if not hasattr(part, 'available_width') or part.available_width == 0:
+		part.dpi = 300
+		if part.staves:
+			part.width = max(s.img.shape[1] for s in part.staves)
+		part._layout(dpi=part.dpi)
+
+	staff = part.staves[stave_index]
+	scaled = part._adapt_staff(staff)
+
+	success, buf = cv2.imencode('.png', scaled)
+	if not success:
+		abort(500, description="Failed to encode stave image")
+
+	return send_file(io.BytesIO(buf.tobytes()), mimetype='image/png')
+
+
+@app.route('/api/scores/<score_id>/generate', methods=['POST'])
+def generate_parts(score_id: str):
+	"""Render parts into output pages using per-part layout adjustments.
+
+	Expects JSON:
+	{
+	  "parts": {
+	    "Violin I": {
+	      "spacing_mm": 10,
+	      "offsets": [0, 0, 15, 0, -10, 0, 0, 0],
+	      "page_breaks_after": [3]
+	    }
+	  }
+	}
+	"""
+	entry = _validate_score_id(score_id)
+	score = entry["score"]
+
+	if not score.parts_dict:
+		abort(400, description="No parts created yet. Run partition first.")
+
+	data = request.get_json()
+	if not data or 'parts' not in data:
+		abort(400, description="Missing 'parts' in request body")
+
+	parts_config = data['parts']
+
+	try:
+		for part in score.parts:
+			part.pages = []  # reset any previous render
+			cfg = parts_config.get(part.name, {})
+
+			spacing_mm = cfg.get('spacing_mm')
+			if spacing_mm is not None:
+				if not (2 <= spacing_mm <= 30):
+					abort(400, description=f"spacing_mm must be 2–30 for '{part.name}'")
+				part._custom_spacing_mm = spacing_mm
+
+			offsets = cfg.get('offsets')
+			if offsets is not None:
+				if len(offsets) != len(part.staves):
+					abort(400, description=(
+						f"offsets length ({len(offsets)}) != stave count "
+						f"({len(part.staves)}) for '{part.name}'"
+					))
+			page_breaks_after = cfg.get('page_breaks_after')
+
+			if part.staves:
+				part.process(offsets=offsets, page_breaks_after=page_breaks_after)
 	except PartError as e:
 		abort(500, description=f"Part processing failed: {e}")
-
-	score.parts = parts_list
-	score.parts_dict = parts_dict
 
 	return jsonify({
 		"parts": [
@@ -383,7 +497,7 @@ def partition_score(score_id: str):
 				"page_count": len(p.pages),
 				"staves_count": len(p.staves),
 			}
-			for p in parts_list
+			for p in score.parts
 		]
 	})
 

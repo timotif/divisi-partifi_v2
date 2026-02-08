@@ -1,6 +1,6 @@
-import { Download } from 'lucide-react';
+import { Download, X } from 'lucide-react';
 
-const ExportResults = ({ parts, scoreId, onError }) => {
+const ExportResults = ({ parts, scoreId, onError, onDismiss }) => {
   const handleDownload = async (partName) => {
     const res = await fetch(`/api/scores/${scoreId}/parts/${encodeURIComponent(partName)}`);
     if (!res.ok) { onError(`Download failed: ${res.status}`); return; }
@@ -14,20 +14,31 @@ const ExportResults = ({ parts, scoreId, onError }) => {
   };
 
   return (
-    <div className="mt-4 p-4 bg-success/5 border border-success/20 rounded-md">
-      <h3 className="font-medium text-success text-sm mb-2">Parts generated successfully:</h3>
+    <div className="p-4 bg-surface-card border border-success/30 rounded-md shadow-lg">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="font-medium text-success text-sm">Parts ready:</h3>
+        {onDismiss && (
+          <button
+            onClick={onDismiss}
+            className="text-gray-400 hover:text-gray-600 transition-colors"
+            title="Dismiss"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
+      </div>
       <ul className="space-y-1">
         {parts.map((part) => (
           <li key={part.name} className="flex items-center gap-2">
-            <Download className="w-3.5 h-3.5 text-success" />
+            <Download className="w-3.5 h-3.5 text-success flex-shrink-0" />
             <button
               onClick={() => handleDownload(part.name)}
-              className="text-accent hover:underline text-sm"
+              className="text-accent hover:underline text-sm truncate"
             >
               {part.name}.pdf
             </button>
-            <span className="text-xs text-gray-400">
-              ({part.staves_count} staves, {part.page_count} output pages)
+            <span className="text-xs text-gray-400 whitespace-nowrap">
+              ({part.page_count}p)
             </span>
           </li>
         ))}

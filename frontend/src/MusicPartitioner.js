@@ -5,6 +5,7 @@ import PageNavigation from './components/PageNavigation';
 import Toolbar from './components/Toolbar';
 import StripNamesColumn from './components/StripNamesColumn';
 import ScoreCanvas from './components/ScoreCanvas';
+import LayoutPreview from './components/LayoutPreview';
 
 const STRIP_COLUMN_WIDTH = 160;
 const GAP = 16;
@@ -12,11 +13,18 @@ const MIN_PAGE_WIDTH = 400;
 
 const MusicPartitioner = () => {
   // --- App lifecycle ---
-  const [phase, setPhase] = useState('upload'); // 'upload' | 'edit' | 'exporting'
+  const [phase, setPhase] = useState('upload'); // 'upload' | 'edit' | 'exporting' | 'preview' | 'generating'
 
   // --- Score metadata from backend ---
   const [scoreId, setScoreId] = useState(null);
   const [scoreMetadata, setScoreMetadata] = useState(null);
+
+  // --- Layout preview state ---
+  const [previewData, setPreviewData] = useState(null);
+  const [spacingByPart, setSpacingByPart] = useState({});
+  const [offsetsByPart, setOffsetsByPart] = useState({});
+  const [pageBreaksByPart, setPageBreaksByPart] = useState({});
+  const [selectedPartIndex, setSelectedPartIndex] = useState(0);
 
   // --- Current page ---
   const [currentPage, setCurrentPage] = useState(0);
@@ -156,18 +164,84 @@ const MusicPartitioner = () => {
   const strips = getStrips();
 
   // --- Auto-fill ---
-  const autoFillStripNames = useCallback((names, currentStrips, editedIndex) => {
-    const stripCount = currentStrips.length;
-    const knownNames = [];
+
+  // Build known instrument sequence from a page's strip names + strips.
+  // Returns array of unique names from the first system, e.g. ["Vln I", "Vln II", "Vla"].
+  const buildKnownSequence = useCallback((names, pageStrips) => {
+    const known = [];
     const seen = new Set();
-    for (let i = 0; i < names.length && i < stripCount; i++) {
-      if (i > 0 && currentStrips[i].isSystemStart) break;
+    for (let i = 0; i < names.length && i < pageStrips.length; i++) {
+      if (i > 0 && pageStrips[i].isSystemStart) break;
       const name = names[i];
       if (name === undefined || name === '') break;
       if (seen.has(name)) break;
       seen.add(name);
-      knownNames.push(name);
+      known.push(name);
     }
+    return known;
+  }, []);
+
+  // Derive strip objects from raw divider/system-flag arrays (same logic as getStrips
+  // but works for any page, not just currentPage).
+  const deriveStrips = useCallback((dividers, systemFlags) => {
+    if (!dividers || dividers.length < 2) return [];
+    const result = [];
+    for (let j = 0; j < dividers.length - 1; j++) {
+      if (systemFlags[j + 1]) continue;
+      result.push({
+        start: dividers[j],
+        end: dividers[j + 1],
+        height: dividers[j + 1] - dividers[j],
+        isSystemStart: !!systemFlags[j],
+      });
+    }
+    return result;
+  }, []);
+
+  // Fill empty strip names on a single page using a known sequence, cycling and
+  // resetting at system dividers. For non-empty names (user-typed), sync the
+  // sequence position to that name so subsequent fills continue correctly.
+  const fillPageNames = useCallback((names, pageStrips, knownSeq) => {
+    if (!knownSeq.length || !pageStrips.length) return names;
+    const result = [...names];
+    let seqIdx = 0;
+    for (let i = 0; i < pageStrips.length; i++) {
+      if (pageStrips[i].isSystemStart) seqIdx = 0;
+      if (!result[i] || result[i] === '') {
+        // Empty: fill from sequence
+        result[i] = knownSeq[seqIdx % knownSeq.length];
+        seqIdx++;
+      } else {
+        // Non-empty (user-typed): sync sequence position to this name
+        const pos = knownSeq.indexOf(result[i]);
+        if (pos !== -1) {
+          seqIdx = pos + 1;
+        } else {
+          seqIdx++;
+        }
+      }
+    }
+    return result;
+  }, []);
+
+  // Build the global known sequence by scanning ALL pages for the first one that
+  // has a complete sequence in its first system.
+  const buildGlobalKnownSequence = useCallback((allNames, allDividers, allSystemFlags) => {
+    const pageCount = scoreMetadata?.page_count || 0;
+    for (let p = 0; p < pageCount; p++) {
+      const divs = allDividers[p];
+      const sysFlags = allSystemFlags[p];
+      const names = allNames[p];
+      if (!divs || divs.length < 2 || !names) continue;
+      const pageStrips = deriveStrips(divs, sysFlags);
+      const seq = buildKnownSequence(names, pageStrips);
+      if (seq.length > 0) return seq;
+    }
+    return [];
+  }, [scoreMetadata, deriveStrips, buildKnownSequence]);
+
+  const autoFillStripNames = useCallback((names, currentStrips, editedIndex) => {
+    const knownNames = buildKnownSequence(names, currentStrips);
     if (knownNames.length === 0) return names;
 
     const editedName = names[editedIndex];
@@ -175,7 +249,7 @@ const MusicPartitioner = () => {
     if (seqIndex === -1) return names;
 
     const result = [...names];
-    for (let i = editedIndex + 1; i < stripCount; i++) {
+    for (let i = editedIndex + 1; i < currentStrips.length; i++) {
       if (currentStrips[i].isSystemStart) {
         seqIndex = -1;
       }
@@ -183,7 +257,7 @@ const MusicPartitioner = () => {
       result[i] = knownNames[seqIndex % knownNames.length];
     }
     return result;
-  }, []);
+  }, [buildKnownSequence]);
 
   // --- Helper: get the most recently confirmed page's dividers ---
   const getLatestConfirmedDividers = useCallback((beforePage) => {
@@ -282,40 +356,42 @@ const MusicPartitioner = () => {
 
     if (!confirmedPages.has(pageNum)) {
       const latestDividers = getLatestConfirmedDividers(pageNum);
-      const latestStripNames = getLatestConfirmedStripNames(pageNum);
       const latestSystemDividers = getLatestConfirmedSystemDividers(pageNum);
 
-      const derivedStrips = [];
-      for (let j = 0; j < latestDividers.length - 1; j++) {
-        if (latestSystemDividers[j + 1]) continue;
-        derivedStrips.push({
-          start: latestDividers[j],
-          end: latestDividers[j + 1],
-          height: latestDividers[j + 1] - latestDividers[j],
-          isSystemStart: !!latestSystemDividers[j],
-        });
-      }
-      const filledNames = derivedStrips.length > 0
-        ? autoFillStripNames([...latestStripNames], derivedStrips, 0)
-        : [...latestStripNames];
-
+      // Build the global known sequence from all pages, then fill this page
       setDividersByPage(prev => ({
         ...prev,
         [pageNum]: prev[pageNum]?.length ? prev[pageNum] : [...latestDividers],
-      }));
-      setStripNamesByPage(prev => ({
-        ...prev,
-        [pageNum]: prev[pageNum]?.length ? prev[pageNum] : filledNames,
       }));
       setSystemDividersByPage(prev => ({
         ...prev,
         [pageNum]: prev[pageNum]?.length ? prev[pageNum] : [...latestSystemDividers],
       }));
+      setStripNamesByPage(prev => {
+        const targetDividers = prev[pageNum]?.length ? dividersByPage[pageNum] : latestDividers;
+        const targetSysFlags = prev[pageNum]?.length ? (systemDividersByPage[pageNum] || []) : latestSystemDividers;
+        const pageStrips = deriveStrips(targetDividers, targetSysFlags);
+
+        // Try global sequence first, fall back to latest confirmed page's names
+        const globalSeq = buildGlobalKnownSequence(prev, dividersByPage, systemDividersByPage);
+        let filledNames;
+        if (globalSeq.length > 0 && pageStrips.length > 0) {
+          filledNames = fillPageNames(prev[pageNum] || [], pageStrips, globalSeq);
+        } else {
+          const latestNames = getLatestConfirmedStripNames(pageNum);
+          filledNames = [...latestNames];
+        }
+
+        return {
+          ...prev,
+          [pageNum]: prev[pageNum]?.length ? prev[pageNum] : filledNames,
+        };
+      });
     }
 
     setCurrentPage(pageNum);
     setPageImageUrl(`/api/scores/${scoreId}/pages/${pageNum}`);
-  }, [scoreMetadata, scoreId, confirmedPages, getLatestConfirmedDividers, getLatestConfirmedStripNames, getLatestConfirmedSystemDividers, autoFillStripNames]);
+  }, [scoreMetadata, scoreId, confirmedPages, getLatestConfirmedDividers, getLatestConfirmedStripNames, getLatestConfirmedSystemDividers, dividersByPage, systemDividersByPage, deriveStrips, buildGlobalKnownSequence, fillPageNames]);
 
   // --- Divider management ---
   const addDividerAtY = (y, isSystem = false) => {
@@ -525,13 +601,22 @@ const MusicPartitioner = () => {
     setPhase('exporting');
     setError(null);
 
+    // Build global known sequence and fill all pages before sending
+    const globalSeq = buildGlobalKnownSequence(stripNamesByPage, dividersByPage, systemDividersByPage);
+
     const pagesPayload = {};
     for (let i = 0; i < scoreMetadata.page_count; i++) {
       const dividers = dividersByPage[i] || dividersByPage[0] || [];
       const systemFlags = systemDividersByPage[i] || systemDividersByPage[0] || [];
-      const names = stripNamesByPage[i] || stripNamesByPage[0] || [];
+      let names = stripNamesByPage[i] || stripNamesByPage[0] || [];
 
       if (dividers.length < 2) continue;
+
+      // Apply global auto-fill to ensure all strips are named
+      if (globalSeq.length > 0) {
+        const pageStrips = deriveStrips(dividers, systemFlags);
+        names = fillPageNames(names, pageStrips, globalSeq);
+      }
 
       const stripNames = [];
       let realIdx = 0;
@@ -569,17 +654,99 @@ const MusicPartitioner = () => {
       }
 
       const data = await response.json();
-      setExportResult(data.parts);
-      setPhase('edit');
+      setPreviewData(data.parts);
+      // Initialize per-part adjustment state
+      const initSpacing = {};
+      const initOffsets = {};
+      const initBreaks = {};
+      for (const part of data.parts) {
+        initSpacing[part.name] = part.layout.default_spacing_px;
+        initOffsets[part.name] = new Array(part.staves_count).fill(0);
+        initBreaks[part.name] = new Set();
+      }
+      setSpacingByPart(initSpacing);
+      setOffsetsByPart(initOffsets);
+      setPageBreaksByPart(initBreaks);
+      setSelectedPartIndex(0);
+      setPhase('preview');
     } catch (err) {
       setError(err.message);
       setPhase('edit');
     }
   };
 
+  // --- Generate handler (from preview phase) ---
+  const handleGenerate = async () => {
+    if (!previewData) return;
+    setPhase('generating');
+    setError(null);
+
+    const partsPayload = {};
+    for (const part of previewData) {
+      const spacingPx = spacingByPart[part.name] ?? part.layout.default_spacing_px;
+      const spacingMm = spacingPx * 25.4 / 300;
+      const offsets = offsetsByPart[part.name] || new Array(part.staves_count).fill(0);
+      const breaks = pageBreaksByPart[part.name] || new Set();
+      partsPayload[part.name] = {
+        spacing_mm: Math.round(spacingMm * 10) / 10,
+        offsets: offsets,
+        page_breaks_after: [...breaks],
+      };
+    }
+
+    try {
+      const response = await fetch(`/api/scores/${scoreId}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parts: partsPayload }),
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || `Generate failed: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setExportResult(data.parts);
+      setPhase('edit');
+    } catch (err) {
+      setError(err.message);
+      setPhase('preview');
+    }
+  };
+
   // --- Render: Upload phase ---
   if (phase === 'upload') {
     return <UploadScreen onUpload={handleUpload} uploading={uploading} error={error} />;
+  }
+
+  // --- Render: Preview / Generating phase ---
+  if (phase === 'preview' || phase === 'generating') {
+    return (
+      <LayoutPreview
+        scoreId={scoreId}
+        previewData={previewData}
+        spacingByPart={spacingByPart}
+        offsetsByPart={offsetsByPart}
+        pageBreaksByPart={pageBreaksByPart}
+        selectedPartIndex={selectedPartIndex}
+        onSelectPart={setSelectedPartIndex}
+        onSpacingChange={(partName, val) => setSpacingByPart(prev => ({ ...prev, [partName]: val }))}
+        onOffsetsChange={(partName, offsets) => setOffsetsByPart(prev => ({ ...prev, [partName]: offsets }))}
+        onPageBreaksChange={(partName, breaks) => setPageBreaksByPart(prev => ({ ...prev, [partName]: breaks }))}
+        onResetPart={(partName, defaultSpacing) => {
+          const part = previewData.find(p => p.name === partName);
+          setSpacingByPart(prev => ({ ...prev, [partName]: defaultSpacing }));
+          setOffsetsByPart(prev => ({ ...prev, [partName]: new Array(part.staves_count).fill(0) }));
+          setPageBreaksByPart(prev => ({ ...prev, [partName]: new Set() }));
+        }}
+        onBackToEdit={() => setPhase('edit')}
+        onGenerate={handleGenerate}
+        isGenerating={phase === 'generating'}
+        error={error}
+        onClearError={() => setError(null)}
+      />
+    );
   }
 
   // --- Render: Edit / Exporting phase ---
@@ -665,17 +832,24 @@ const MusicPartitioner = () => {
             onGoToPage={goToPage}
           />
 
-          {/* Export results — download links */}
-          {exportResult && (
-            <ExportResults parts={exportResult} scoreId={scoreId} onError={setError} />
-          )}
-
           {/* Status info */}
           <div className="mt-2 text-center text-xs text-gray-400">
             {currentDividers.length} dividers, {strips.length} parts • Click to add divider, Shift+click for system divider • Type part names to auto-fill
           </div>
         </div>
       </div>
+
+      {/* Export results — fixed side panel, doesn't affect main layout */}
+      {exportResult && (
+        <div className="fixed top-4 right-4 w-64 z-30">
+          <ExportResults
+            parts={exportResult}
+            scoreId={scoreId}
+            onError={setError}
+            onDismiss={() => setExportResult(null)}
+          />
+        </div>
+      )}
     </div>
   );
 };

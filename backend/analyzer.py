@@ -234,7 +234,7 @@ class Part:
 			width_mm, height_mm = 210, 297
 			margins_mm = {'top': 20, 'bottom': 15, 'left': 15, 'right': 15}
 			title_area_mm = 30  # Space for title on first page
-			system_spacing_mm = 12  # Space between staves
+			system_spacing_mm = getattr(self, '_custom_spacing_mm', 12)
 			# Convert to pixels
 			self.width = to_px(width_mm - margins_mm['left'] - margins_mm['right'], dpi)
 			self.height = to_px(height_mm - margins_mm['top'] - margins_mm['bottom'], dpi)
@@ -323,35 +323,157 @@ class Part:
 		for x, y, w, h, img in rects:
 			self._paste_img_on_page(page, img, y, x)
 
-	def process(self):
+	def _find_source_page_index(self, staff: Staff) -> int:
+		"""Return the index of the staff's source page within the score."""
+		if staff.page and staff.page.score:
+			try:
+				return staff.page.score.pages.index(staff.page)
+			except ValueError:
+				pass
+		return -1
+
+	def preview_metadata(self) -> dict:
+		"""Compute layout geometry and return per-stave metadata for the preview phase.
+
+		Does NOT render pages — just computes dimensions so the frontend
+		can paginate client-side.
+		"""
 		if self.staves:
 			self.width = max(staff.img.shape[1] for staff in self.staves)
 		self.dpi = 300
 		self._layout(dpi=self.dpi)
-		# Create a blank page with the specified dimensions
-		page = create_blank_page(self.width, self.height)  # White page
-		# Paste header image centered on the first page
+
+		header_meta = None
 		if self.header_img is not None:
 			scaled = self._scale_header()
-			sh, sw = scaled.shape[:2]
-			x_off = self.margins['left'] + (self.available_width - sw) // 2
-			page[self.margins['top']:self.margins['top'] + sh, x_off:x_off + sw] = scaled
+			header_meta = {"scaled_height": scaled.shape[0]}
+
+		staves_meta = []
+		for i, staff in enumerate(self.staves):
+			scaled = self._adapt_staff(staff)
+			# Compute the overhead from markings that sit above the staff
+			markings_overhead = 0
+			if staff.markings and staff.source_page_width:
+				scale = self.available_width / staff.source_page_width
+				gap = max(4, int(self.spacing * 0.1))
+				to_paste = [
+					m for m in staff.markings
+					if not (m['inside_first'] and m['is_first_in_system'])
+				]
+				for m in to_paste:
+					scaled_img = self._scale_img(m['img'], scale)
+					out_y = int(m['y_offset'] * scale)
+					# If marking extends above staff top (out_y < 0),
+					# or overlaps into the staff, it needs overhead space
+					if out_y < 0:
+						markings_overhead = max(markings_overhead, -out_y + gap)
+					elif out_y + scaled_img.shape[0] > 0:
+						markings_overhead = max(markings_overhead, scaled_img.shape[0] - out_y + gap)
+			staves_meta.append({
+				"index": i,
+				"source_page": self._find_source_page_index(staff),
+				"scaled_height": scaled.shape[0],
+				"markings_overhead_px": markings_overhead,
+			})
+
+		return {
+			"name": self.name,
+			"short_name": self.short_name,
+			"staves_count": len(self.staves),
+			"staves": staves_meta,
+			"header": header_meta,
+			"layout": {
+				"available_height_px": self.available_height,
+				"title_area_px": self.title_area,
+				"default_spacing_px": self.spacing,
+			},
+		}
+
+	def process(self, offsets=None, page_breaks_after=None):
+		"""Render staves onto output pages.
+
+		Args:
+			offsets: optional list of per-stave vertical offset adjustments
+				in backend pixels (positive = more space above). Length must
+				match stave count if provided.
+			page_breaks_after: optional list of stave indices after which to
+				force a page break. Staves before the break are justified to
+				fill the page.
+		"""
+		if self.staves:
+			self.width = max(staff.img.shape[1] for staff in self.staves)
+		self.dpi = 300
+		self._layout(dpi=self.dpi)
+
+		if offsets is None:
+			offsets = [0] * len(self.staves)
+		breaks = set(page_breaks_after) if page_breaks_after else set()
+
+		# --- Pass 1: assign staves to pages ---
+		page_assignments = [[]]  # list of lists of (stave_index, scaled_img)
 		y_pos = self._reset_y_pos()
-		for staff in self.staves:
-			staff_img_resized = self._adapt_staff(staff)
-			if staff_img_resized.shape[1] > self.available_width:
+		scaled_imgs = []
+		for i, staff in enumerate(self.staves):
+			img = self._adapt_staff(staff)
+			scaled_imgs.append(img)
+			if img.shape[1] > self.available_width:
 				raise PartError(f"Staff image width exceeds page width: {staff.name}")
-			# Place the staff image on the page
-			page[y_pos:y_pos + staff_img_resized.shape[0], self.margins['left']:self.margins['left'] + staff_img_resized.shape[1]] = staff_img_resized
-			# Paste markings (tempo, etc.) relative to this staff's position
-			self._paste_markings(page, staff, y_pos)
-			y_pos += staff_img_resized.shape[0] + self.spacing
-			# If the page height is exceeded, create a new page
-			if y_pos + staff_img_resized.shape[0] > self.height - self.margins['bottom']:
-				self.pages.append(page)
-				page = create_blank_page(self.width, self.height)
+			staff_h = img.shape[0]
+			gap = self.spacing + offsets[i] if page_assignments[-1] else 0
+			if page_assignments[-1] and y_pos + gap + staff_h > self.height - self.margins['bottom']:
+				page_assignments.append([])
 				y_pos = self._reset_y_pos()
-		self.pages.append(page)
+			if page_assignments[-1]:
+				y_pos += self.spacing + offsets[i]
+			page_assignments[-1].append(i)
+			y_pos += staff_h
+			if i in breaks and i < len(self.staves) - 1:
+				page_assignments.append([])
+				y_pos = self._reset_y_pos()
+
+		# --- Pass 2: render pages, justifying forced-break pages ---
+		# Paste header on first page
+		scaled_header = None
+		if self.header_img is not None:
+			scaled_header = self._scale_header()
+
+		for p_idx, indices in enumerate(page_assignments):
+			if not indices:
+				continue
+			page = create_blank_page(self.width, self.height)
+			is_first = (p_idx == 0)
+
+			if is_first and scaled_header is not None:
+				sh, sw = scaled_header.shape[:2]
+				x_off = self.margins['left'] + (self.available_width - sw) // 2
+				page[self.margins['top']:self.margins['top'] + sh, x_off:x_off + sw] = scaled_header
+
+			start_y = self._reset_y_pos() if is_first else self.margins['top']
+			has_forced_break = any(i in breaks for i in indices)
+
+			# Compute total stave height on this page
+			total_stave_h = sum(scaled_imgs[i].shape[0] for i in indices)
+			num_gaps = len(indices) - 1
+			remaining = (self.height - self.margins['bottom']) - start_y - total_stave_h
+
+			# Justified gap for forced-break pages
+			if has_forced_break and num_gaps > 0 and remaining > num_gaps * self.spacing:
+				gap_size = remaining / num_gaps
+			else:
+				gap_size = None  # use normal spacing + offsets
+
+			y = start_y
+			for j, idx in enumerate(indices):
+				if j > 0:
+					if gap_size is not None:
+						y += int(gap_size)
+					else:
+						y += self.spacing + offsets[idx]
+				staff_img = scaled_imgs[idx]
+				self._paste_img_on_page(page, staff_img, y, self.margins['left'])
+				self._paste_markings(page, self.staves[idx], y)
+				y += staff_img.shape[0]
+			self.pages.append(page)
 
 def example_page():
 	try:
