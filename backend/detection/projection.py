@@ -1,7 +1,7 @@
 """Horizontal projection profile for staff line detection.
 
-Standalone prototype — not wired into the app. Run directly:
-    source .venv/bin/activate && python projection.py [image_path]
+Can be used as a library or run directly for visual debugging:
+    python projection.py [image_or_pdf] [page_num]
 
 Pipeline:
     1. Binarize (grayscale + Otsu threshold)
@@ -20,49 +20,10 @@ Pipeline:
 import sys
 
 import cv2 as cv
-import fitz  # PyMuPDF
-import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import find_peaks
 
-matplotlib.use('TkAgg')
-
-DEFAULT_IMG = "./backend/img/music.png"
-PDF_DPI = 300  # Must match analyzer.py extraction DPI
-
-
-# ---------------------------------------------------------------------------
-# PDF page extraction
-# ---------------------------------------------------------------------------
-
-def load_pdf_page(pdf_path, page_num=0, dpi=PDF_DPI):
-    """Extract a single page from a PDF as a grayscale numpy array.
-
-    Uses PyMuPDF at the given DPI (default 300, matching analyzer.py).
-
-    Args:
-        pdf_path: path to the PDF file.
-        page_num: 0-based page index.
-        dpi: rendering resolution.
-
-    Returns:
-        img: BGR numpy array (3-channel, for consistency with cv.imread).
-    """
-    doc = fitz.open(pdf_path)
-    if page_num < 0 or page_num >= len(doc):
-        raise ValueError(
-            f"Page {page_num} out of range (PDF has {len(doc)} pages)"
-        )
-    pix = doc[page_num].get_pixmap(dpi=dpi, alpha=False)
-    # PyMuPDF pixmap → numpy array (RGB), then convert to BGR for OpenCV
-    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-    if pix.n == 1:
-        img = cv.cvtColor(img, cv.COLOR_GRAY2BGR)
-    elif pix.n == 3:
-        img = cv.cvtColor(img, cv.COLOR_RGB2BGR)
-    doc.close()
-    return img
+from .pdf import load_pdf_page
 
 
 # ---------------------------------------------------------------------------
@@ -454,19 +415,18 @@ def detect_staves(source, page_num=0):
             If a PDF, ``page_num`` selects which page to analyze.
         page_num: 0-based page index (only used for PDFs).
 
-    Returns a dict with all intermediate results (for visualization/debugging).
+    Returns a dict with all intermediate results:
+        img, binary, projection, smoothed, peaks, staves, systems,
+        orphans, confidence, reasons.
     """
     if isinstance(source, np.ndarray):
         img = source
-        label = f"array ({img.shape[1]}x{img.shape[0]})"
     elif source.lower().endswith(".pdf"):
         img = load_pdf_page(source, page_num)
-        label = f"{source} (page {page_num})"
     else:
         img = cv.imread(source)
         if img is None:
             raise FileNotFoundError(f"Could not load: {source}")
-        label = source
 
     binary = binarize(img)
     projection = horizontal_projection(binary)
@@ -481,13 +441,6 @@ def detect_staves(source, page_num=0):
 
     systems = cluster_into_systems(staves)
     confidence, reasons = compute_confidence(systems, staves, orphans, len(peaks))
-
-    print(f"\n{label}:")
-    print(f"  Peaks: {len(peaks)}, Staves: {len(staves)}, "
-          f"Systems: {len(systems)}, Orphans: {len(orphans)}")
-    print(f"  Confidence: {confidence:.0%}")
-    for r in reasons:
-        print(f"    - {r}")
 
     return {
         "img": img,
@@ -504,11 +457,15 @@ def detect_staves(source, page_num=0):
 
 
 # ---------------------------------------------------------------------------
-# Visualization
+# Visualization (only imported when running directly)
 # ---------------------------------------------------------------------------
 
 def plot_results(result):
     """Three-panel plot: annotated image, projection profile, text summary."""
+    import matplotlib
+    import matplotlib.pyplot as plt
+    matplotlib.use('TkAgg')
+
     img = result["img"]
     projection = result["projection"]
     smoothed = result["smoothed"]
@@ -599,6 +556,16 @@ def plot_results(result):
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def _print_summary(result, label):
+    """Print detection summary to stdout."""
+    print(f"\n{label}:")
+    print(f"  Peaks: {len(result['peaks'])}, Staves: {len(result['staves'])}, "
+          f"Systems: {len(result['systems'])}, Orphans: {len(result['orphans'])}")
+    print(f"  Confidence: {result['confidence']:.0%}")
+    for r in result["reasons"]:
+        print(f"    - {r}")
+
+
 def main():
     """Usage: python projection.py [image_or_pdf] [page_num]
 
@@ -608,9 +575,13 @@ def main():
         python projection.py score.pdf                # first page of PDF
         python projection.py score.pdf 3              # page 3 (0-based)
     """
-    source = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_IMG
+    default_img = str(
+        __import__("pathlib").Path(__file__).resolve().parent.parent / "img" / "music.png"
+    )
+    source = sys.argv[1] if len(sys.argv) > 1 else default_img
     page_num = int(sys.argv[2]) if len(sys.argv) > 2 else 0
     result = detect_staves(source, page_num=page_num)
+    _print_summary(result, source)
     plot_results(result)
 
 
