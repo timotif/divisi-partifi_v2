@@ -20,6 +20,7 @@ Pipeline:
 import sys
 
 import cv2 as cv
+import fitz  # PyMuPDF
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,6 +29,40 @@ from scipy.signal import find_peaks
 matplotlib.use('TkAgg')
 
 DEFAULT_IMG = "./backend/img/music.png"
+PDF_DPI = 300  # Must match analyzer.py extraction DPI
+
+
+# ---------------------------------------------------------------------------
+# PDF page extraction
+# ---------------------------------------------------------------------------
+
+def load_pdf_page(pdf_path, page_num=0, dpi=PDF_DPI):
+    """Extract a single page from a PDF as a grayscale numpy array.
+
+    Uses PyMuPDF at the given DPI (default 300, matching analyzer.py).
+
+    Args:
+        pdf_path: path to the PDF file.
+        page_num: 0-based page index.
+        dpi: rendering resolution.
+
+    Returns:
+        img: BGR numpy array (3-channel, for consistency with cv.imread).
+    """
+    doc = fitz.open(pdf_path)
+    if page_num < 0 or page_num >= len(doc):
+        raise ValueError(
+            f"Page {page_num} out of range (PDF has {len(doc)} pages)"
+        )
+    pix = doc[page_num].get_pixmap(dpi=dpi, alpha=False)
+    # PyMuPDF pixmap → numpy array (RGB), then convert to BGR for OpenCV
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+    if pix.n == 1:
+        img = cv.cvtColor(img, cv.COLOR_GRAY2BGR)
+    elif pix.n == 3:
+        img = cv.cvtColor(img, cv.COLOR_RGB2BGR)
+    doc.close()
+    return img
 
 
 # ---------------------------------------------------------------------------
@@ -118,13 +153,18 @@ def cluster_into_staves(peaks, expected_lines=5, tolerance=0.4):
     sorted_gaps = np.sort(gaps)
     typical_spacing = sorted_gaps[max(0, len(sorted_gaps) // 4)]
     max_stave_span = typical_spacing * (expected_lines - 1) * (1 + tolerance)
+    # Max gap between two adjacent lines in a stave. Anything larger means
+    # the peaks aren't part of the same stave (e.g. slur/bracket artifact).
+    # 2× is lenient enough for noisy low-res peaks (~6-7px at typical=4px)
+    # but still rejects bracket/slur gaps (~42px at typical=11px = 3.8×).
+    max_line_gap = typical_spacing * 2
 
     # --- Split peaks into candidate groups ---
     groups = []
     current_group = [peaks[0]]
     for i, gap in enumerate(gaps):
         span_with_next = peaks[i + 1] - current_group[0]
-        if gap > max_stave_span or span_with_next > max_stave_span:
+        if gap > max_line_gap or span_with_next > max_stave_span:
             groups.append(np.array(current_group))
             current_group = [peaks[i + 1]]
         else:
@@ -406,14 +446,27 @@ def compute_confidence(systems, staves, orphans, total_peaks):
 # Full pipeline
 # ---------------------------------------------------------------------------
 
-def detect_staves(img_path):
-    """Run the full detection pipeline on an image file.
+def detect_staves(source, page_num=0):
+    """Run the full detection pipeline.
+
+    Args:
+        source: file path (PNG/JPG/PDF) or a numpy array (BGR image).
+            If a PDF, ``page_num`` selects which page to analyze.
+        page_num: 0-based page index (only used for PDFs).
 
     Returns a dict with all intermediate results (for visualization/debugging).
     """
-    img = cv.imread(img_path)
-    if img is None:
-        raise FileNotFoundError(f"Could not load: {img_path}")
+    if isinstance(source, np.ndarray):
+        img = source
+        label = f"array ({img.shape[1]}x{img.shape[0]})"
+    elif source.lower().endswith(".pdf"):
+        img = load_pdf_page(source, page_num)
+        label = f"{source} (page {page_num})"
+    else:
+        img = cv.imread(source)
+        if img is None:
+            raise FileNotFoundError(f"Could not load: {source}")
+        label = source
 
     binary = binarize(img)
     projection = horizontal_projection(binary)
@@ -429,7 +482,7 @@ def detect_staves(img_path):
     systems = cluster_into_systems(staves)
     confidence, reasons = compute_confidence(systems, staves, orphans, len(peaks))
 
-    print(f"\n{img_path}:")
+    print(f"\n{label}:")
     print(f"  Peaks: {len(peaks)}, Staves: {len(staves)}, "
           f"Systems: {len(systems)}, Orphans: {len(orphans)}")
     print(f"  Confidence: {confidence:.0%}")
@@ -547,8 +600,17 @@ def plot_results(result):
 # ---------------------------------------------------------------------------
 
 def main():
-    img_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_IMG
-    result = detect_staves(img_path)
+    """Usage: python projection.py [image_or_pdf] [page_num]
+
+    Examples:
+        python projection.py                          # default test image
+        python projection.py score.png                # single image
+        python projection.py score.pdf                # first page of PDF
+        python projection.py score.pdf 3              # page 3 (0-based)
+    """
+    source = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_IMG
+    page_num = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    result = detect_staves(source, page_num=page_num)
     plot_results(result)
 
 
