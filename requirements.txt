@@ -1,5 +1,5 @@
 numpy==2.2.5
 opencv-python==4.11.0.86
 PyMuPDF==1.25.5
-flask>=3.0
-flask-cors>=4.0
+flask==3.1.1
+flask-cors==6.0.0

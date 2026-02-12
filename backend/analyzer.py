@@ -4,11 +4,6 @@ import cv2
 import numpy as np
 import pymupdf as fitz
 
-def show(img, title="Image"):
-	cv2.imshow(title, img)
-	cv2.waitKey(0)
-	cv2.destroyAllWindows()
-
 def crop_image(image, x, y, w, h):
 	# Crop the image using the provided coordinates
 	return image[y:y+h, x:x+w]
@@ -38,29 +33,14 @@ def x_overlaps(a, b):
 def sanitize_string(value: str) -> str:
 	"""Sanitize user-provided strings for use in filenames and paths.
 	Strips path separators, null bytes, and non-printable characters.
+	Returns empty string for None input.
 	"""
 	if value is None:
-		return None
+		return ""
 	value = value.replace('\x00', '').replace('/', '').replace('\\', '')
 	value = re.sub(r'[^\x20-\x7E]', '', value)
 	value = re.sub(r'\s+', ' ', value).strip()
 	return value[:128]
-
-# def example():
-# 	staves_data = {} # Dictionary name: [y, h]
-# 	staves = {}
-
-# 	staves_data["fl"] = [100, 50]
-# 	staves_data["picc"] = [150, 40]
-# 	staves_data["EH"] = [190, 50]
-
-# 	img = cv2.imread("./img/music.png")
-# 	img_gray = cv2.imread("./img/music.png", cv2.IMREAD_GRAYSCALE)
-# 	for staff in staves_data:
-# 		x, w = (0, img.shape[1])
-# 		y, h = staves_data[staff]
-# 		staves[staff] = crop_image(img_gray, x, y, w, h)
-# 		show(staves[staff], staff)
 
 class Score:
 	def __init__(self, path: str, title: str = None, composer: str = None, keep_temp_files: bool = False):
@@ -235,9 +215,9 @@ class Part:
 			margins_mm = {'top': 20, 'bottom': 15, 'left': 15, 'right': 15}
 			title_area_mm = 30  # Space for title on first page
 			system_spacing_mm = getattr(self, '_custom_spacing_mm', 12)
-			# Convert to pixels
-			self.width = to_px(width_mm - margins_mm['left'] - margins_mm['right'], dpi)
-			self.height = to_px(height_mm - margins_mm['top'] - margins_mm['bottom'], dpi)
+			# Convert to pixels — width/height are FULL page dimensions
+			self.width = to_px(width_mm, dpi)
+			self.height = to_px(height_mm, dpi)
 			self.spacing = to_px(system_spacing_mm, dpi)
 			self.margins = {
 				'top': to_px(margins_mm['top'], dpi),
@@ -305,20 +285,28 @@ class Part:
 		rects.sort(key=lambda r: r[1] + r[3] - staff_y_on_page, reverse=True)
 
 		# Push each rect up by its overlap distance with the staff top,
-		# then cascade: if the moved rect collides with another in the
-		# same column, push that one up by the same amount.
+		# then iteratively resolve collisions until stable.
 		for i, rect in enumerate(rects):
 			dist = (rect[1] + rect[3]) - staff_y_on_page
 			if dist <= 0:
 				continue
-			shift = dist + gap
-			rect[1] -= shift
-			# Cascade to any x-overlapping rect that now collides
-			for j in range(len(rects)):
-				if j == i:
-					continue
-				if x_overlaps(rect, rects[j]) and rects_collide(rect, rects[j]):
-					rects[j][1] -= shift
+			rect[1] -= dist + gap
+
+		# Iteratively resolve collisions: push colliding rects upward
+		# until no overlaps remain (max iterations to prevent infinite loops).
+		for _ in range(len(rects) * len(rects)):
+			moved = False
+			for i in range(len(rects)):
+				for j in range(len(rects)):
+					if i == j:
+						continue
+					if x_overlaps(rects[i], rects[j]) and rects_collide(rects[i], rects[j]):
+						# Push the lower rect above the upper rect
+						lower, upper = (i, j) if rects[i][1] > rects[j][1] else (j, i)
+						rects[lower][1] = rects[upper][1] - rects[lower][3] - gap
+						moved = True
+			if not moved:
+				break
 
 		for x, y, w, h, img in rects:
 			self._paste_img_on_page(page, img, y, x)
@@ -411,7 +399,9 @@ class Part:
 
 		# --- Pass 1: assign staves to pages ---
 		page_assignments = [[]]  # list of lists of (stave_index, scaled_img)
-		y_pos = self._reset_y_pos()
+		first_page_start = self.margins['top'] + self.title_area
+		later_page_start = self.margins['top']
+		y_pos = first_page_start
 		scaled_imgs = []
 		for i, staff in enumerate(self.staves):
 			img = self._adapt_staff(staff)
@@ -422,14 +412,14 @@ class Part:
 			gap = self.spacing + offsets[i] if page_assignments[-1] else 0
 			if page_assignments[-1] and y_pos + gap + staff_h > self.height - self.margins['bottom']:
 				page_assignments.append([])
-				y_pos = self._reset_y_pos()
+				y_pos = later_page_start
 			if page_assignments[-1]:
 				y_pos += self.spacing + offsets[i]
 			page_assignments[-1].append(i)
 			y_pos += staff_h
 			if i in breaks and i < len(self.staves) - 1:
 				page_assignments.append([])
-				y_pos = self._reset_y_pos()
+				y_pos = later_page_start
 
 		# --- Pass 2: render pages, justifying forced-break pages ---
 		# Paste header on first page
@@ -474,15 +464,6 @@ class Part:
 				self._paste_markings(page, self.staves[idx], y)
 				y += staff_img.shape[0]
 			self.pages.append(page)
-
-def example_page():
-	try:
-		page = (Page("./img/music.png", grayscale=True))
-		# show(page.img, "Page")
-		# page_wrong = (Page("./img/wrong", grayscale=False))
-		return page
-	except PageLoadError as e:
-		print(f"Error loading page: {e}")
 
 def example_score():
 	try:
@@ -538,7 +519,6 @@ def example():
 		# 	show(page, f"Part: {part.name} - Page {i+1}")
 
 TMP_DIR = os.path.join(os.path.dirname(__file__), "tmp")
-PAGE_PATH = "./img/music.png"
 SCORE_PATH = "./img/score.pdf"
 
 if __name__ == "__main__":

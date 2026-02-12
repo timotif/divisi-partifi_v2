@@ -1,23 +1,47 @@
 import os
 import io
 import uuid
+import time
+import logging
 import cv2
 import pymupdf as fitz
 from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
 from analyzer import (
-	Score, Page, Staff, Part, TMP_DIR,
+	Score, Staff, Part, TMP_DIR,
 	sanitize_string, PageError, StaffError, PartError
 )
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=os.getenv('CORS_ORIGINS', '*').split(','))
 
 MAX_UPLOAD_SIZE_MB = 50
 app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
-# In-memory session store: score_id -> { 'score': Score, 'metadata': dict }
+# In-memory session store: score_id -> { 'score': Score, 'metadata': dict, 'created_at': float }
 scores: dict[str, dict] = {}
+
+MAX_SESSIONS = 50
+SESSION_TTL_SECONDS = 3600  # 1 hour
+
+
+def _evict_expired_sessions():
+	"""Remove sessions older than SESSION_TTL_SECONDS, then evict the oldest
+	if we're still at capacity."""
+	now = time.time()
+	expired = [sid for sid, entry in scores.items()
+			   if now - entry.get('created_at', 0) > SESSION_TTL_SECONDS]
+	for sid in expired:
+		logger.info("Evicting expired session %s", sid)
+		del scores[sid]
+
+	while len(scores) >= MAX_SESSIONS:
+		oldest = min(scores, key=lambda k: scores[k].get('created_at', 0))
+		logger.info("Evicting oldest session %s (at capacity)", oldest)
+		del scores[oldest]
 
 
 # --- Error handlers ---
@@ -40,7 +64,8 @@ def internal_error(e):
 
 
 def _validate_score_id(score_id: str) -> dict:
-	"""Validate UUID format and look up score. Aborts with 400/404 on failure."""
+	"""Validate UUID format and look up score. Aborts with 400/404 on failure.
+	Refreshes the session TTL on successful access."""
 	try:
 		uuid.UUID(score_id)
 	except ValueError:
@@ -48,6 +73,7 @@ def _validate_score_id(score_id: str) -> dict:
 	entry = scores.get(score_id)
 	if not entry:
 		abort(404, description="Score not found")
+	entry['created_at'] = time.time()
 	return entry
 
 
@@ -81,17 +107,25 @@ def upload_score():
 		)
 		score._extract_pages(dpi=300)
 	except Exception as e:
+		logger.exception("PDF processing failed for upload")
 		if os.path.exists(pdf_path):
 			os.remove(pdf_path)
-		abort(500, description=f"Failed to process PDF: {e}")
+		abort(500, description="Failed to process the uploaded PDF")
+	finally:
+		# Clean up uploaded PDF — pages are already extracted into memory
+		if os.path.exists(pdf_path):
+			os.remove(pdf_path)
 
 	pages_meta = []
 	for i, page in enumerate(score.pages):
 		h, w = page.img.shape[:2]
 		pages_meta.append({"page_num": i, "width": w, "height": h})
 
+	_evict_expired_sessions()
+
 	scores[score_id] = {
 		"score": score,
+		"created_at": time.time(),
 		"metadata": {
 			"score_id": score_id,
 			"title": score.title,
@@ -116,7 +150,8 @@ def serve_page(score_id: str, page_num: int):
 	try:
 		png_bytes = score.pages[page_num].to_png_bytes()
 	except PageError as e:
-		abort(500, description=str(e))
+		logger.exception("Failed to encode page %d", page_num)
+		abort(500, description="Failed to encode page image")
 
 	return send_file(io.BytesIO(png_bytes), mimetype='image/png')
 
@@ -310,7 +345,8 @@ def partition_score(score_id: str):
 				page.staves.append(staff)
 				part.staves.append(staff)
 	except StaffError as e:
-		abort(500, description=f"Staff creation failed: {e}")
+		logger.exception("Staff creation failed during partition")
+		abort(500, description="Staff creation failed")
 
 	if not parts_list:
 		abort(400, description="No strips found across all pages")
@@ -355,7 +391,6 @@ def partition_score(score_id: str):
 
 		target_system = None
 		for system in systems:
-			sys_top = system[0]['y']
 			sys_bottom = system[-1]['y'] + system[-1]['h']
 			if ann_y_center <= sys_bottom:
 				target_system = system
@@ -399,7 +434,8 @@ def partition_score(score_id: str):
 			if part.staves:
 				preview_parts.append(part.preview_metadata())
 	except PartError as e:
-		abort(500, description=f"Preview metadata failed: {e}")
+		logger.exception("Preview metadata computation failed")
+		abort(500, description="Preview metadata computation failed")
 
 	return jsonify({"parts": preview_parts})
 
@@ -409,6 +445,10 @@ def serve_stave_image(score_id: str, part_name: str, stave_index: int):
 	"""Serve a single stave image (scaled to the part's output width) as PNG."""
 	entry = _validate_score_id(score_id)
 	score = entry["score"]
+
+	part_name = sanitize_string(part_name)
+	if not part_name:
+		abort(400, description="Invalid part name")
 
 	if not score.parts_dict:
 		abort(404, description="No parts available. Run partition first.")
@@ -432,6 +472,7 @@ def serve_stave_image(score_id: str, part_name: str, stave_index: int):
 
 	success, buf = cv2.imencode('.png', scaled)
 	if not success:
+		logger.error("Failed to encode stave image for part '%s', index %d", part_name, stave_index)
 		abort(500, description="Failed to encode stave image")
 
 	return send_file(io.BytesIO(buf.tobytes()), mimetype='image/png')
@@ -487,7 +528,8 @@ def generate_parts(score_id: str):
 			if part.staves:
 				part.process(offsets=offsets, page_breaks_after=page_breaks_after)
 	except PartError as e:
-		abort(500, description=f"Part processing failed: {e}")
+		logger.exception("Part processing failed during generate")
+		abort(500, description="Part processing failed")
 
 	return jsonify({
 		"parts": [
@@ -508,6 +550,10 @@ def download_part(score_id: str, part_name: str):
 	entry = _validate_score_id(score_id)
 	score = entry["score"]
 
+	part_name = sanitize_string(part_name)
+	if not part_name:
+		abort(400, description="Invalid part name")
+
 	if not score.parts_dict:
 		abort(404, description="No parts generated yet. Run partition first.")
 
@@ -523,7 +569,8 @@ def download_part(score_id: str, part_name: str):
 	for page_img in part.pages:
 		success, jpg_buf = cv2.imencode('.jpg', page_img, [cv2.IMWRITE_JPEG_QUALITY, 92])
 		if not success:
-			abort(500, description=f"Failed to encode page image for part '{part_name}'")
+			logger.error("Failed to encode page image for part '%s'", part_name)
+			abort(500, description="Failed to encode page image")
 
 		img_bytes = jpg_buf.tobytes()
 		# Create a page matching the image dimensions (in points: 72 DPI)
@@ -546,4 +593,6 @@ def download_part(score_id: str, part_name: str):
 
 if __name__ == '__main__':
 	os.makedirs(TMP_DIR, exist_ok=True)
-	app.run(debug=True, port=5000)
+	app.run(debug=os.getenv('FLASK_DEBUG', 'true').lower() == 'true', port=5000) # TODO: change to false in production
+
+	

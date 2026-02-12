@@ -26,7 +26,7 @@ const ScoreCanvas = ({
     <div className="border border-surface-border rounded-md overflow-hidden" style={{ width: pageWidth, flexShrink: 0 }}>
       <div
         ref={containerRef}
-        className={`relative bg-white select-none ${isRectSelecting ? 'cursor-crosshair' : 'cursor-crosshair'}`}
+        className={`relative bg-white select-none ${isRectSelecting ? 'cursor-crosshair' : 'cursor-default'}`}
         style={{ width: pageWidth, height: pageHeight }}
         onClick={onContainerClick}
         onMouseDown={onRectMouseDown}

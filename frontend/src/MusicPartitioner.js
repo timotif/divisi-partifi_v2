@@ -358,7 +358,11 @@ const MusicPartitioner = () => {
       const latestDividers = getLatestConfirmedDividers(pageNum);
       const latestSystemDividers = getLatestConfirmedSystemDividers(pageNum);
 
-      // Build the global known sequence from all pages, then fill this page
+      // Pre-compute the target dividers/flags for this page so all setters
+      // use consistent values (avoids stale closure reads).
+      const targetDividers = dividersByPage[pageNum]?.length ? dividersByPage[pageNum] : latestDividers;
+      const targetSysFlags = dividersByPage[pageNum]?.length ? (systemDividersByPage[pageNum] || []) : latestSystemDividers;
+
       setDividersByPage(prev => ({
         ...prev,
         [pageNum]: prev[pageNum]?.length ? prev[pageNum] : [...latestDividers],
@@ -368,12 +372,13 @@ const MusicPartitioner = () => {
         [pageNum]: prev[pageNum]?.length ? prev[pageNum] : [...latestSystemDividers],
       }));
       setStripNamesByPage(prev => {
-        const targetDividers = prev[pageNum]?.length ? dividersByPage[pageNum] : latestDividers;
-        const targetSysFlags = prev[pageNum]?.length ? (systemDividersByPage[pageNum] || []) : latestSystemDividers;
         const pageStrips = deriveStrips(targetDividers, targetSysFlags);
 
-        // Try global sequence first, fall back to latest confirmed page's names
-        const globalSeq = buildGlobalKnownSequence(prev, dividersByPage, systemDividersByPage);
+        // Try global sequence first, fall back to latest confirmed page's names.
+        // Use targetDividers/targetSysFlags for all pages to stay consistent.
+        const allDividers = { ...dividersByPage, [pageNum]: targetDividers };
+        const allSysFlags = { ...systemDividersByPage, [pageNum]: targetSysFlags };
+        const globalSeq = buildGlobalKnownSequence(prev, allDividers, allSysFlags);
         let filledNames;
         if (globalSeq.length > 0 && pageStrips.length > 0) {
           filledNames = fillPageNames(prev[pageNum] || [], pageStrips, globalSeq);
@@ -395,6 +400,9 @@ const MusicPartitioner = () => {
 
   // --- Divider management ---
   const addDividerAtY = (y, isSystem = false) => {
+    // Both setters independently compute insertIdx from y against their
+    // own prev state. This avoids stale-closure issues without nesting
+    // setters (which causes double-execution in StrictMode).
     setDividersByPage(prev => {
       const divs = prev[currentPage] || [];
       let insertIdx = 0;
@@ -404,6 +412,9 @@ const MusicPartitioner = () => {
       return { ...prev, [currentPage]: newDividers };
     });
     setSystemDividersByPage(prev => {
+      // Compute insertIdx from the dividers for this page (read from
+      // dividersByPage which is the current render's snapshot — matches
+      // the array that setDividersByPage's updater will also see).
       const divs = dividersByPage[currentPage] || [];
       let insertIdx = 0;
       while (insertIdx < divs.length && divs[insertIdx] < y) insertIdx++;
