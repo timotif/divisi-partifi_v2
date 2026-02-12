@@ -66,7 +66,14 @@ const ScoreCanvas = ({
         })()}
 
         {/* Strip visualization */}
-        {strips.map((strip, index) => (
+        {strips.map((strip, index) => {
+          // Compute per-system part number (resets at each system divider)
+          let num = 0;
+          for (let k = 0; k <= index; k++) {
+            if (strips[k].isSystemStart) num = 0;
+            num++;
+          }
+          return (
           <div
             key={index}
             className="absolute border border-dashed border-accent/40 bg-accent/5 group hover:bg-accent/10 transition-colors"
@@ -78,13 +85,14 @@ const ScoreCanvas = ({
             }}
           >
             <div className="absolute top-1 left-2 bg-accent/70 text-white px-2 py-0.5 rounded text-xs">
-              {stripNames[index] || `Strip ${index + 1}`}
+              {stripNames[index] || `Part ${num}`}
             </div>
             <div className="absolute top-2 right-2 bg-black/40 text-white px-2 py-1 rounded text-xs opacity-0 group-hover:opacity-100 transition-opacity">
               {strip.height}px tall
             </div>
           </div>
-        ))}
+          );
+        })}
 
         {/* Draggable dividers */}
         {dividers.map((y, index) => {

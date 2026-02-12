@@ -5,9 +5,11 @@ import PageNavigation from './components/PageNavigation';
 import Toolbar from './components/Toolbar';
 import StripNamesColumn from './components/StripNamesColumn';
 import ScoreCanvas from './components/ScoreCanvas';
+import AnnotationsPanel from './components/AnnotationsPanel';
 import LayoutPreview from './components/LayoutPreview';
 
 const STRIP_COLUMN_WIDTH = 160;
+const ANNOTATIONS_PANEL_WIDTH = 176; // w-44 = 11rem = 176px
 const GAP = 16;
 const MIN_PAGE_WIDTH = 400;
 
@@ -89,7 +91,9 @@ const MusicPartitioner = () => {
   const currentPageMeta = scoreMetadata?.pages?.[currentPage];
   const backendWidth = currentPageMeta?.width || 1;
   const backendHeight = currentPageMeta?.height || 1;
-  const availableWidth = Math.max(MIN_PAGE_WIDTH, measuredSize.width - STRIP_COLUMN_WIDTH - GAP);
+  const hasAnnotations = !!headerRegion || markings.length > 0;
+  const annotationsPanelSpace = hasAnnotations ? ANNOTATIONS_PANEL_WIDTH + GAP : 0;
+  const availableWidth = Math.max(MIN_PAGE_WIDTH, measuredSize.width - STRIP_COLUMN_WIDTH - GAP - annotationsPanelSpace);
   const availableHeight = measuredSize.height > 100 ? measuredSize.height : 600;
   const scaleByWidth = availableWidth / backendWidth;
   const scaleByHeight = availableHeight / backendHeight;
@@ -422,6 +426,45 @@ const MusicPartitioner = () => {
       flags.splice(insertIdx, 0, isSystem);
       return { ...prev, [currentPage]: flags };
     });
+    // Insert an empty name for the new strip and auto-fill using the
+    // known sequence. We recompute new dividers/flags from the render
+    // snapshot (same values the setters above will produce).
+    setStripNamesByPage(prev => {
+      const divs = dividersByPage[currentPage] || [];
+      let insertIdx = 0;
+      while (insertIdx < divs.length && divs[insertIdx] < y) insertIdx++;
+
+      const newDividers = [...divs];
+      newDividers.splice(insertIdx, 0, y);
+      const oldFlags = systemDividersByPage[currentPage] || [];
+      const newFlags = [...oldFlags];
+      newFlags.splice(insertIdx, 0, isSystem);
+
+      const oldStrips = deriveStrips(divs, oldFlags);
+      const newStrips = deriveStrips(newDividers, newFlags);
+
+      // Map old names onto new strip positions: match by old strip's
+      // start position so names stay with their original strip.
+      const oldNames = prev[currentPage] || [];
+      const names = new Array(newStrips.length).fill('');
+      let oldIdx = 0;
+      for (let i = 0; i < newStrips.length && oldIdx < oldStrips.length; i++) {
+        if (newStrips[i].start === oldStrips[oldIdx].start &&
+            newStrips[i].end === oldStrips[oldIdx].end) {
+          names[i] = oldNames[oldIdx] || '';
+          oldIdx++;
+        }
+      }
+
+      // Auto-fill empty slots using the global known sequence
+      const allDividers = { ...dividersByPage, [currentPage]: newDividers };
+      const allSysFlags = { ...systemDividersByPage, [currentPage]: newFlags };
+      const globalSeq = buildGlobalKnownSequence(prev, allDividers, allSysFlags);
+      if (globalSeq.length > 0) {
+        return { ...prev, [currentPage]: fillPageNames(names, newStrips, globalSeq) };
+      }
+      return { ...prev, [currentPage]: names };
+    });
     setConfirmedPages(prev => new Set(prev).add(currentPage));
   };
 
@@ -504,6 +547,24 @@ const MusicPartitioner = () => {
       };
     }
   }, [rectDragStart, handleRectMouseMove, handleRectMouseUp]);
+
+  // --- Keyboard shortcuts for header (H) and marking (M) selection ---
+  useEffect(() => {
+    if (phase !== 'edit') return;
+    const handleKeyDown = (e) => {
+      // Ignore when typing in an input/textarea
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key === 'h' || e.key === 'H') {
+        setIsSelectingHeader(prev => !prev);
+        setIsSelectingMarking(false);
+      } else if (e.key === 'm' || e.key === 'M') {
+        setIsSelectingMarking(prev => !prev);
+        setIsSelectingHeader(false);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [phase]);
 
   const rectPreview = rectDragStart && rectDragCurrent ? {
     x: Math.min(rectDragStart.x, rectDragCurrent.x),
@@ -777,9 +838,7 @@ const MusicPartitioner = () => {
             onAddDivider={addDivider}
             onExport={handleExport}
             onToggleSelectHeader={() => { setIsSelectingHeader(!isSelectingHeader); setIsSelectingMarking(false); }}
-            onClearHeader={() => setHeaderRegion(null)}
             onToggleSelectMarking={() => { setIsSelectingMarking(!isSelectingMarking); setIsSelectingHeader(false); }}
-            onClearMarkings={() => setMarkings([])}
             isRectSelecting={isRectSelecting}
             isSelectingHeader={isSelectingHeader}
             isSelectingMarking={isSelectingMarking}
@@ -833,6 +892,15 @@ const MusicPartitioner = () => {
               containerRef={containerRef}
               isRectSelecting={isRectSelecting}
             />
+
+            {/* Annotations sidebar */}
+            <AnnotationsPanel
+              headerRegion={headerRegion}
+              onClearHeader={() => setHeaderRegion(null)}
+              markings={markings}
+              onRemoveMarking={(idx) => setMarkings(prev => prev.filter((_, j) => j !== idx))}
+              onClearMarkings={() => setMarkings([])}
+            />
           </div>
 
           {/* Page navigation */}
@@ -845,7 +913,7 @@ const MusicPartitioner = () => {
 
           {/* Status info */}
           <div className="mt-2 text-center text-xs text-gray-400">
-            {currentDividers.length} dividers, {strips.length} parts • Click to add divider, Shift+click for system divider • Type part names to auto-fill
+            {currentDividers.length} dividers, {strips.length} parts • Click to add divider, Shift+click for system divider • Type part names to auto-fill • <kbd className="px-1 py-0.5 bg-gray-200 rounded text-[10px]">H</kbd> header, <kbd className="px-1 py-0.5 bg-gray-200 rounded text-[10px]">M</kbd> marking
           </div>
         </div>
       </div>

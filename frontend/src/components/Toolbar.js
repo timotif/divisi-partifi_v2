@@ -1,13 +1,11 @@
-import { Download, Plus, Upload, Type, X, Clock } from 'lucide-react';
+import { Download, Plus, Upload, Type, Clock } from 'lucide-react';
 
 const Toolbar = ({
   onNewScore,
   onAddDivider,
   onExport,
   onToggleSelectHeader,
-  onClearHeader,
   onToggleSelectMarking,
-  onClearMarkings,
   isRectSelecting,
   isSelectingHeader,
   isSelectingMarking,
@@ -16,8 +14,6 @@ const Toolbar = ({
   isExporting,
   stripCount,
 }) => {
-  const hasAnnotations = hasHeader || markingCount > 0;
-
   return (
     <div className="mb-6">
       <div className="flex items-center justify-between">
@@ -50,17 +46,9 @@ const Toolbar = ({
             }`}
           >
             <Type className="w-4 h-4" />
-            {isSelectingHeader ? 'Draw Header...' : hasHeader ? 'Header Set' : 'Select Header'}
+            {isSelectingHeader ? 'Draw Header...' : hasHeader ? 'Header Set' : 'Header'}
+            <kbd className="ml-1 px-1 py-0.5 bg-white/20 rounded text-[10px] font-mono">H</kbd>
           </button>
-          {hasHeader && !isSelectingHeader && (
-            <button
-              onClick={onClearHeader}
-              className="flex items-center gap-1 px-2 py-1.5 bg-gray-100 text-gray-500 rounded-md hover:bg-red-50 hover:text-danger transition-colors"
-              title="Clear header selection"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          )}
           <button
             onClick={onToggleSelectMarking}
             className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition-colors text-sm ${
@@ -72,17 +60,9 @@ const Toolbar = ({
             }`}
           >
             <Clock className="w-4 h-4" />
-            {isSelectingMarking ? 'Draw Marking...' : markingCount > 0 ? `Marking (${markingCount})` : 'Select Marking'}
+            {isSelectingMarking ? 'Draw Marking...' : markingCount > 0 ? `Marking (${markingCount})` : 'Marking'}
+            <kbd className="ml-1 px-1 py-0.5 bg-white/20 rounded text-[10px] font-mono">M</kbd>
           </button>
-          {markingCount > 0 && !isSelectingMarking && (
-            <button
-              onClick={onClearMarkings}
-              className="flex items-center gap-1 px-2 py-1.5 bg-gray-100 text-gray-500 rounded-md hover:bg-red-50 hover:text-danger transition-colors"
-              title="Clear all markings"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          )}
           <button
             onClick={onExport}
             disabled={isExporting || stripCount === 0}
@@ -93,24 +73,6 @@ const Toolbar = ({
           </button>
         </div>
       </div>
-
-      {/* Annotation legend */}
-      {hasAnnotations && (
-        <div className="mt-2 flex items-center gap-4 text-xs text-gray-500">
-          {hasHeader && (
-            <div className="flex items-center gap-1.5">
-              <span className="inline-block w-2.5 h-2.5 rounded-sm bg-success" />
-              Header
-            </div>
-          )}
-          {markingCount > 0 && (
-            <div className="flex items-center gap-1.5">
-              <span className="inline-block w-2.5 h-2.5 rounded-sm bg-warning" />
-              Marking ({markingCount})
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 };
