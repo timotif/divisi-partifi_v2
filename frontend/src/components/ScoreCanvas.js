@@ -109,36 +109,36 @@ const ScoreCanvas = ({
 
             {/* Draggable handle */}
             <div
-              className={`absolute w-6 h-6 rounded-full cursor-ns-resize z-20 flex items-center justify-center transition-colors shadow-sm ${
+              className={`absolute w-4 h-4 rounded-full cursor-ns-resize z-20 flex items-center justify-center transition-colors shadow-sm ${
                 isSystem
                   ? 'bg-system hover:bg-system/80'
                   : 'bg-accent hover:bg-accent/80'
               }`}
               style={{
-                top: y - 12,
-                left: pageWidth - 26
+                top: y - 8,
+                left: pageWidth - 20
               }}
               onMouseDown={(e) => onDividerMouseDown(e, index)}
               onClick={(e) => e.stopPropagation()}
               title={isSystem ? 'System divider — drag to adjust' : 'Drag to adjust strip boundary'}
             >
               {isSystem
-                ? <div className="w-3 h-0.5 bg-white" />
-                : <div className="w-1.5 h-1.5 bg-white rounded-full" />
+                ? <div className="w-2 h-0.5 bg-white" />
+                : <div className="w-1 h-1 bg-white rounded-full" />
               }
             </div>
 
             {/* Remove button */}
             <button
-              className="absolute w-5 h-5 bg-gray-400 rounded-full cursor-pointer z-20 flex items-center justify-center hover:bg-danger transition-colors text-white"
+              className="absolute w-4 h-4 bg-gray-400 rounded-full cursor-pointer z-20 flex items-center justify-center hover:bg-danger transition-colors text-white"
               style={{
-                top: y - 10,
-                left: pageWidth - 44
+                top: y - 8,
+                left: pageWidth - 36
               }}
               onClick={(e) => { e.stopPropagation(); onRemoveDivider(index); }}
               title="Remove this divider"
             >
-              <Trash2 className="w-2.5 h-2.5" />
+              <Trash2 className="w-2 h-2" />
             </button>
           </div>
           );

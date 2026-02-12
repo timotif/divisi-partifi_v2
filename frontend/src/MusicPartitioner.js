@@ -632,8 +632,8 @@ const MusicPartitioner = () => {
     const newY = mouseY - dragOffset;
 
     const divs = dividersByPage[currentPage] || [];
-    const minY = dragIndex === 0 ? 20 : divs[dragIndex - 1] + 20;
-    const maxY = dragIndex === divs.length - 1 ? pageHeight - 20 : divs[dragIndex + 1] - 20;
+    const minY = dragIndex === 0 ? 12 : divs[dragIndex - 1] + 12;
+    const maxY = dragIndex === divs.length - 1 ? pageHeight - 12 : divs[dragIndex + 1] - 12;
 
     const constrainedY = Math.max(minY, Math.min(maxY, newY));
 
