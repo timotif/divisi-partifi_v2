@@ -69,8 +69,8 @@ frontend/src/
 
 If you find Divisi useful and want to support its development:
 
-- [Buy Me a Coffee](https://buymeacoffee.com/timotif)
-- [Ko-fi](https://ko-fi.com/timotif)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/timotif)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/timotif)
 
 ## License
 
