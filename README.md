@@ -65,9 +65,12 @@ frontend/src/
 - **Layout preview**: Client-side pagination distributes staves across A4 pages. Drag staves to adjust vertical position, click between staves to insert forced page breaks, and use the spacing slider (8-16mm) to control density.
 - **Marking placement**: Header and tempo markings are selected as rectangles and automatically repositioned on each part's output pages with collision avoidance.
 
-## Donations
+## Support
 
-If this project becomes useful and you'd like to help cover hosting costs, donations are welcome. Details will be added once there is a stable hosting setup.
+If you find Divisi useful and want to support its development:
+
+- [Buy Me a Coffee](https://buymeacoffee.com/timotif)
+- [Ko-fi](https://ko-fi.com/timotif)
 
 ## License
 
