@@ -434,7 +434,11 @@ const MusicPartitioner = () => {
       });
 
       if (!response.ok) {
-        console.warn(`Detection failed for page ${pageNum}`);
+        console.warn(`Detection failed for page ${pageNum}: HTTP ${response.status}`);
+        setDetectionWarnings(prev => ({
+          ...prev,
+          [pageNum]: 'Auto-detection failed. You can add dividers manually.',
+        }));
         setDetectedPages(prev => new Set(prev).add(pageNum));
         return;
       }
@@ -491,6 +495,10 @@ const MusicPartitioner = () => {
       setDetectedPages(prev => new Set(prev).add(pageNum));
     } catch (err) {
       console.warn(`Detection request failed for page ${pageNum}:`, err);
+      setDetectionWarnings(prev => ({
+        ...prev,
+        [pageNum]: 'Auto-detection failed. You can add dividers manually.',
+      }));
       setDetectedPages(prev => new Set(prev).add(pageNum));
     } finally {
       setDetectingPage(null);
