@@ -463,8 +463,8 @@ def detect_staves(source, page_num=0):
 def plot_results(result):
     """Three-panel plot: annotated image, projection profile, text summary."""
     import matplotlib
-    import matplotlib.pyplot as plt
     matplotlib.use('TkAgg')
+    import matplotlib.pyplot as plt
 
     img = result["img"]
     projection = result["projection"]

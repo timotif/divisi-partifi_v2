@@ -143,8 +143,8 @@ def _draw_lines(img, lines, color):
 def plot_results(result):
     """Four-panel plot: grayscale, edges, vertical lines, horizontal lines."""
     import matplotlib
-    import matplotlib.pyplot as plt
     matplotlib.use('TkAgg')
+    import matplotlib.pyplot as plt
 
     img = result["img"]
     edges = result["edges"]
