@@ -13,13 +13,33 @@ const Toolbar = ({
   markingCount,
   isExporting,
   stripCount,
+  autoDetect,
+  onToggleAutoDetect,
 }) => {
   return (
     <div className="mb-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-gray-700">Divisi</h1>
 
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {/* Auto-detect toggle */}
+          <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mr-2">
+            <button
+              role="switch"
+              aria-checked={autoDetect}
+              onClick={onToggleAutoDetect}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                autoDetect ? 'bg-accent' : 'bg-gray-300'
+              }`}
+            >
+              <span
+                className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+                  autoDetect ? 'translate-x-[18px]' : 'translate-x-[3px]'
+                }`}
+              />
+            </button>
+            Auto-detect
+          </label>
           <button
             onClick={onNewScore}
             className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200 transition-colors text-sm"

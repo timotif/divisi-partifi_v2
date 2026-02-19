@@ -47,6 +47,12 @@ const MusicPartitioner = () => {
   // --- Export results ---
   const [exportResult, setExportResult] = useState(null);
 
+  // --- Staff detection state ---
+  const [autoDetect, setAutoDetect] = useState(true);
+  const [detectedPages, setDetectedPages] = useState(new Set());
+  const [detectingPage, setDetectingPage] = useState(null); // page number or null
+  const [detectionWarnings, setDetectionWarnings] = useState({});
+
   // --- Header region: rectangle selection for piece title ---
   const [headerRegion, setHeaderRegion] = useState(null); // { page, x, y, w, h } in display pixels
   const [isSelectingHeader, setIsSelectingHeader] = useState(false);
@@ -341,6 +347,9 @@ const MusicPartitioner = () => {
       setStripNamesByPage(initialStripNames);
       setSystemDividersByPage(initialSystemDividers);
       setConfirmedPages(new Set());
+      setDetectedPages(new Set());
+      setDetectingPage(null);
+      setDetectionWarnings({});
       setExportResult(null);
       // Reset prevPageWidthRef so rescaling doesn't trigger on fresh upload
       prevPageWidthRef.current = null;
@@ -358,7 +367,15 @@ const MusicPartitioner = () => {
   const goToPage = useCallback((pageNum) => {
     if (!scoreMetadata || pageNum < 0 || pageNum >= scoreMetadata.page_count) return;
 
-    if (!confirmedPages.has(pageNum)) {
+    // Propagate dividers from the latest confirmed page — but only when
+    // auto-detect is off (or the page already has dividers from detection).
+    // When auto-detect is on and the page is fresh, let detection fill it.
+    const pageHasDividers = dividersByPage[pageNum]?.length > 0;
+    const shouldPropagate = !confirmedPages.has(pageNum)
+      && !pageHasDividers
+      && !autoDetect;
+
+    if (shouldPropagate) {
       const latestDividers = getLatestConfirmedDividers(pageNum);
       const latestSystemDividers = getLatestConfirmedSystemDividers(pageNum);
 
@@ -400,7 +417,100 @@ const MusicPartitioner = () => {
 
     setCurrentPage(pageNum);
     setPageImageUrl(`/api/scores/${scoreId}/pages/${pageNum}`);
-  }, [scoreMetadata, scoreId, confirmedPages, getLatestConfirmedDividers, getLatestConfirmedStripNames, getLatestConfirmedSystemDividers, dividersByPage, systemDividersByPage, deriveStrips, buildGlobalKnownSequence, fillPageNames]);
+  }, [scoreMetadata, scoreId, confirmedPages, autoDetect, getLatestConfirmedDividers, getLatestConfirmedStripNames, getLatestConfirmedSystemDividers, dividersByPage, systemDividersByPage, deriveStrips, buildGlobalKnownSequence, fillPageNames]);
+
+  // --- Staff detection ---
+  const detectStavesForPage = useCallback(async (pageNum) => {
+    // Skip if already detected, already confirmed, currently detecting, or dividers present
+    if (detectedPages.has(pageNum) || confirmedPages.has(pageNum)) return;
+    if (detectingPage !== null) return;
+    if (dividersByPage[pageNum]?.length > 0) return;
+
+    setDetectingPage(pageNum);
+
+    try {
+      const response = await fetch(`/api/scores/${scoreId}/pages/${pageNum}/detect`, {
+        method: 'POST',
+      });
+
+      if (!response.ok) {
+        console.warn(`Detection failed for page ${pageNum}: HTTP ${response.status}`);
+        setDetectionWarnings(prev => ({
+          ...prev,
+          [pageNum]: 'Auto-detection failed. You can add dividers manually.',
+        }));
+        setDetectedPages(prev => new Set(prev).add(pageNum));
+        return;
+      }
+
+      const data = await response.json();
+
+      if (data.confidence < 0.3 || data.dividers.length < 2) {
+        setDetectionWarnings(prev => ({
+          ...prev,
+          [pageNum]: 'Auto-detection could not find staves on this page.',
+        }));
+        setDetectedPages(prev => new Set(prev).add(pageNum));
+        return;
+      }
+
+      if (data.confidence < 0.7) {
+        setDetectionWarnings(prev => ({
+          ...prev,
+          [pageNum]: `Low-confidence detection (${Math.round(data.confidence * 100)}%) \u2014 please review.`,
+        }));
+      }
+
+      // Convert backend-pixel dividers to display pixels.
+      // Use prevPageWidthRef.current as the ground-truth current display width:
+      // pageWidth in this closure may be stale if a ResizeObserver fired while
+      // the request was in-flight (most likely on page 0 during initial load).
+      const pageMeta = scoreMetadata?.pages?.[pageNum];
+      const bw = pageMeta?.width || 1;
+      const currentWidth = prevPageWidthRef.current || pageWidth;
+      const scale = currentWidth / bw;
+      const dividers = data.dividers.map(d => Math.round(d * scale));
+
+      // Populate dividers only if page still has none (race-condition guard)
+      setDividersByPage(prev => {
+        if (prev[pageNum]?.length > 0) return prev;
+        return { ...prev, [pageNum]: dividers };
+      });
+      setSystemDividersByPage(prev => {
+        if (prev[pageNum]?.length > 0) return prev;
+        return { ...prev, [pageNum]: data.system_flags };
+      });
+      // Auto-fill strip names from the global known sequence
+      setStripNamesByPage(prev => {
+        if (prev[pageNum]?.length > 0) return prev;
+        const pageStrips = deriveStrips(dividers, data.system_flags);
+        const globalSeq = buildGlobalKnownSequence(prev, dividersByPage, systemDividersByPage);
+        if (globalSeq.length > 0 && pageStrips.length > 0) {
+          return { ...prev, [pageNum]: fillPageNames([], pageStrips, globalSeq) };
+        }
+        return { ...prev, [pageNum]: data.strip_names };
+      });
+
+      // Mark as detected but NOT confirmed — user must review
+      setDetectedPages(prev => new Set(prev).add(pageNum));
+    } catch (err) {
+      console.warn(`Detection request failed for page ${pageNum}:`, err);
+      setDetectionWarnings(prev => ({
+        ...prev,
+        [pageNum]: 'Auto-detection failed. You can add dividers manually.',
+      }));
+      setDetectedPages(prev => new Set(prev).add(pageNum));
+    } finally {
+      setDetectingPage(null);
+    }
+  }, [scoreId, pageWidth, scoreMetadata, detectedPages, confirmedPages, detectingPage, dividersByPage, systemDividersByPage, deriveStrips, buildGlobalKnownSequence, fillPageNames]);
+
+  // Trigger detection when a page is viewed in edit mode and pageWidth is ready
+  useEffect(() => {
+    if (autoDetect && phase === 'edit' && scoreId && pageWidth > 1) {
+      detectStavesForPage(currentPage);
+    }
+  }, [autoDetect, phase, scoreId, pageWidth, currentPage, detectStavesForPage]);
 
   // --- Divider management ---
   const addDividerAtY = (y, isSystem = false) => {
@@ -413,6 +523,14 @@ const MusicPartitioner = () => {
       while (insertIdx < divs.length && divs[insertIdx] < y) insertIdx++;
       const newDividers = [...divs];
       newDividers.splice(insertIdx, 0, y);
+
+      // Nested to avoid stale-closure read of dividersByPage for insertIdx
+      setSystemDividersByPage(flagsPrev => {
+        const flags = [...(flagsPrev[currentPage] || [])];
+        flags.splice(insertIdx, 0, isSystem);
+        return { ...flagsPrev, [currentPage]: flags };
+      });
+
       return { ...prev, [currentPage]: newDividers };
     });
     setSystemDividersByPage(prev => {
@@ -846,6 +964,8 @@ const MusicPartitioner = () => {
             markingCount={markings.length}
             isExporting={phase === 'exporting'}
             stripCount={strips.length}
+            autoDetect={autoDetect}
+            onToggleAutoDetect={() => setAutoDetect(prev => !prev)}
           />
 
           {/* Error banner */}
@@ -891,6 +1011,8 @@ const MusicPartitioner = () => {
               onRemoveMarking={(idx) => setMarkings(prev => prev.filter((_, j) => j !== idx))}
               containerRef={containerRef}
               isRectSelecting={isRectSelecting}
+              isDetecting={detectingPage === currentPage}
+              detectionWarning={detectionWarnings[currentPage] || null}
             />
 
             {/* Annotations sidebar */}
@@ -908,6 +1030,7 @@ const MusicPartitioner = () => {
             currentPage={currentPage}
             pageCount={scoreMetadata?.page_count || 0}
             confirmedPages={confirmedPages}
+            detectedPages={detectedPages}
             onGoToPage={goToPage}
           />
 
