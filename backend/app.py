@@ -270,10 +270,11 @@ def staves_to_dividers(
 def detect_page_staves(score_id: str, page_num: int):
 	"""Run staff detection on a page and return tentative divider positions.
 
-	Request JSON: { "display_width": 600 }
+	No request body required.
 
-	Returns dividers and system flags in display-pixel space, plus
-	confidence and diagnostic info.
+	Returns dividers and system flags in backend-pixel space (300 DPI).
+	The frontend is responsible for scaling to display pixels using the
+	page's known backend dimensions.
 	"""
 	entry = _validate_score_id(score_id)
 	score = entry["score"]
@@ -281,29 +282,17 @@ def detect_page_staves(score_id: str, page_num: int):
 	if page_num < 0 or page_num >= len(score.pages):
 		abort(404, description=f"Page {page_num} not found")
 
-	data = request.get_json()
-	display_width = data.get('display_width') if data else None
-	if display_width is None:
-		abort(400, description="'display_width' is required")
-	if not isinstance(display_width, (int, float)) or display_width <= 0:
-		abort(400, description="'display_width' must be a positive number")
-
-	# Check cache
+	# Return cached result if available
 	cache = entry.setdefault("detection_cache", {})
 	if page_num in cache:
 		cached = cache[page_num]
-		# Re-scale cached backend dividers to the requested display_width
-		page_img = score.pages[page_num].img
-		img_height, img_width = page_img.shape[:2]
-		scale = display_width / img_width
 		return jsonify({
 			"confidence": cached["confidence"],
 			"reasons": cached["reasons"],
 			"stave_count": cached["stave_count"],
 			"system_count": cached["system_count"],
-			"dividers": [round(d * scale, 1) for d in cached["backend_dividers"]],
+			"dividers": cached["dividers"],
 			"system_flags": cached["system_flags"],
-			"strip_names": [""] * max(0, len(cached["backend_dividers"]) - 1),
 		})
 
 	page_img = score.pages[page_num].img
@@ -320,31 +309,24 @@ def detect_page_staves(score_id: str, page_num: int):
 	confidence = result["confidence"]
 	reasons = result["reasons"]
 
-	backend_dividers, sys_flags = staves_to_dividers(systems, img_height)
+	dividers, sys_flags = staves_to_dividers(systems, img_height)
 
-	# Cache the backend-pixel results (display-independent)
 	cache[page_num] = {
 		"confidence": confidence,
 		"reasons": reasons,
 		"stave_count": len(staves),
 		"system_count": len(systems),
-		"backend_dividers": backend_dividers,
+		"dividers": dividers,
 		"system_flags": sys_flags,
 	}
-
-	# Scale to display pixels
-	scale = display_width / img_width
-	display_dividers = [round(d * scale, 1) for d in backend_dividers]
-	strip_count = max(0, len(backend_dividers) - 1)
 
 	return jsonify({
 		"confidence": confidence,
 		"reasons": reasons,
 		"stave_count": len(staves),
 		"system_count": len(systems),
-		"dividers": display_dividers,
+		"dividers": dividers,
 		"system_flags": sys_flags,
-		"strip_names": [""] * strip_count,
 	})
 
 

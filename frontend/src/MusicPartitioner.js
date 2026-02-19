@@ -426,15 +426,11 @@ const MusicPartitioner = () => {
     if (detectingPage !== null) return;
     if (dividersByPage[pageNum]?.length > 0) return;
 
-    // Capture the pageWidth at request time so we can rescale if it changed
-    const requestWidth = pageWidth;
     setDetectingPage(pageNum);
 
     try {
       const response = await fetch(`/api/scores/${scoreId}/pages/${pageNum}/detect`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ display_width: requestWidth }),
       });
 
       if (!response.ok) {
@@ -461,14 +457,15 @@ const MusicPartitioner = () => {
         }));
       }
 
-      // Rescale if pageWidth changed while the request was in flight.
-      // prevPageWidthRef tracks the current display width that all dividers
-      // are calibrated to — use it as the ground truth for the current scale.
-      const currentWidth = prevPageWidthRef.current || requestWidth;
-      const ratio = currentWidth / requestWidth;
-      const dividers = ratio === 1
-        ? data.dividers
-        : data.dividers.map(d => Math.round(d * ratio));
+      // Convert backend-pixel dividers to display pixels.
+      // Use prevPageWidthRef.current as the ground-truth current display width:
+      // pageWidth in this closure may be stale if a ResizeObserver fired while
+      // the request was in-flight (most likely on page 0 during initial load).
+      const pageMeta = scoreMetadata?.pages?.[pageNum];
+      const bw = pageMeta?.width || 1;
+      const currentWidth = prevPageWidthRef.current || pageWidth;
+      const scale = currentWidth / bw;
+      const dividers = data.dividers.map(d => Math.round(d * scale));
 
       // Populate dividers only if page still has none (race-condition guard)
       setDividersByPage(prev => {
@@ -498,7 +495,7 @@ const MusicPartitioner = () => {
     } finally {
       setDetectingPage(null);
     }
-  }, [scoreId, pageWidth, detectedPages, confirmedPages, detectingPage, dividersByPage, systemDividersByPage, deriveStrips, buildGlobalKnownSequence, fillPageNames]);
+  }, [scoreId, pageWidth, scoreMetadata, detectedPages, confirmedPages, detectingPage, dividersByPage, systemDividersByPage, deriveStrips, buildGlobalKnownSequence, fillPageNames]);
 
   // Trigger detection when a page is viewed in edit mode and pageWidth is ready
   useEffect(() => {
