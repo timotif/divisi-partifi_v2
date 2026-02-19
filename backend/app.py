@@ -1,9 +1,11 @@
+import logging
 import os
 import io
 import uuid
 import time
 import logging
 import cv2
+import numpy as np
 import pymupdf as fitz
 from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
@@ -11,6 +13,9 @@ from analyzer import (
 	Score, Staff, Part, TMP_DIR,
 	sanitize_string, PageError, StaffError, PartError
 )
+from detection.projection import detect_staves
+
+logger = logging.getLogger(__name__)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -155,6 +160,195 @@ def serve_page(score_id: str, page_num: int):
 
 	return send_file(io.BytesIO(png_bytes), mimetype='image/png')
 
+
+# --- Staff detection helpers ---
+
+def find_divider_y(stave_above: np.ndarray, stave_below: np.ndarray) -> int:
+	"""Find the Y position for a divider between two adjacent staves.
+
+	Currently uses the midpoint between the bottom staff line of stave_above
+	and the top staff line of stave_below. This function is the hook for
+	future refinement (collision detection, optimal gap placement, etc.).
+
+	Args:
+		stave_above: array of 5 Y values for the upper stave's staff lines.
+		stave_below: array of 5 Y values for the lower stave's staff lines.
+
+	Returns:
+		Y position in backend pixels.
+	"""
+	bottom = int(stave_above[-1])
+	top = int(stave_below[0])
+	return (bottom + top) // 2
+
+
+def _compute_typical_margin(systems: list[list[np.ndarray]]) -> int:
+	"""Compute the typical distance from a mid-divider to the nearest staff.
+
+	Collects half-gaps from all inter-stave midpoints across all systems,
+	then returns the median. This is the natural "breathing room" around
+	each staff that boundary dividers should replicate.
+	"""
+	half_gaps: list[int] = []
+	for system in systems:
+		for i in range(len(system) - 1):
+			bottom = int(system[i][-1])
+			top = int(system[i + 1][0])
+			half_gaps.append((top - bottom) // 2)
+	if not half_gaps:
+		return 50  # fallback for single-stave systems
+	return int(np.median(half_gaps))
+
+
+def staves_to_dividers(
+	systems: list[list[np.ndarray]], img_height: int
+) -> tuple[list[int], list[bool]]:
+	"""Convert detected stave groups into divider positions and system flags.
+
+	System dividers mark only the **top** of each system. The dead zone
+	rendered by the frontend is the region between the previous (part)
+	divider and the next system divider. The bottom boundary of each
+	system is a regular part divider.
+
+	Boundary dividers (first/last on the page, and around inter-system
+	gaps) are placed at the same distance from the staff as a typical
+	mid-divider, so all staves get consistent margins.
+
+	Args:
+		systems: list of systems, each a list of staves (each stave is an
+			array of 5 Y pixel positions).
+		img_height: page image height in pixels.
+
+	Returns:
+		(dividers, system_flags) — same-length lists, sorted by Y.
+	"""
+	dividers: list[int] = []
+	system_flags: list[bool] = []
+
+	margin = _compute_typical_margin(systems)
+
+	for sys_idx, system in enumerate(systems):
+		if not system:
+			continue
+
+		first_top = int(system[0][0])
+		last_bottom = int(system[-1][-1])
+
+		# --- Top boundary (system divider) ---
+		if sys_idx == 0:
+			# Same distance above the first staff as a mid-divider
+			top_y = max(0, first_top - margin)
+		else:
+			# Inter-system gap: place 2/3 into the gap (closer to next system)
+			prev_bottom = int(systems[sys_idx - 1][-1][-1])
+			gap = first_top - prev_bottom
+			top_y = prev_bottom + gap * 2 // 3
+		dividers.append(top_y)
+		system_flags.append(True)
+
+		# --- Between-stave dividers (part dividers) ---
+		for i in range(len(system) - 1):
+			dividers.append(find_divider_y(system[i], system[i + 1]))
+			system_flags.append(False)
+
+		# --- Bottom boundary (part divider) ---
+		if sys_idx < len(systems) - 1:
+			# Inter-system gap: place 1/3 into the gap (closer to current system)
+			next_top = int(systems[sys_idx + 1][0][0])
+			gap = next_top - last_bottom
+			bottom_y = last_bottom + gap // 3
+		else:
+			# Same distance below the last staff as a mid-divider
+			bottom_y = min(img_height - 1, last_bottom + margin)
+		dividers.append(bottom_y)
+		system_flags.append(False)
+
+	return dividers, system_flags
+
+
+@app.route('/api/scores/<score_id>/pages/<int:page_num>/detect', methods=['POST'])
+def detect_page_staves(score_id: str, page_num: int):
+	"""Run staff detection on a page and return tentative divider positions.
+
+	Request JSON: { "display_width": 600 }
+
+	Returns dividers and system flags in display-pixel space, plus
+	confidence and diagnostic info.
+	"""
+	entry = _validate_score_id(score_id)
+	score = entry["score"]
+
+	if page_num < 0 or page_num >= len(score.pages):
+		abort(404, description=f"Page {page_num} not found")
+
+	data = request.get_json()
+	display_width = data.get('display_width') if data else None
+	if display_width is None:
+		abort(400, description="'display_width' is required")
+	if not isinstance(display_width, (int, float)) or display_width <= 0:
+		abort(400, description="'display_width' must be a positive number")
+
+	# Check cache
+	cache = entry.setdefault("detection_cache", {})
+	if page_num in cache:
+		cached = cache[page_num]
+		# Re-scale cached backend dividers to the requested display_width
+		page_img = score.pages[page_num].img
+		img_height, img_width = page_img.shape[:2]
+		scale = display_width / img_width
+		return jsonify({
+			"confidence": cached["confidence"],
+			"reasons": cached["reasons"],
+			"stave_count": cached["stave_count"],
+			"system_count": cached["system_count"],
+			"dividers": [round(d * scale, 1) for d in cached["backend_dividers"]],
+			"system_flags": cached["system_flags"],
+			"strip_names": [""] * max(0, len(cached["backend_dividers"]) - 1),
+		})
+
+	page_img = score.pages[page_num].img
+	img_height, img_width = page_img.shape[:2]
+
+	try:
+		result = detect_staves(page_img)
+	except Exception:
+		logger.exception("Staff detection failed for page %d", page_num)
+		abort(500, description="Staff detection failed")
+
+	systems = result["systems"]
+	staves = result["staves"]
+	confidence = result["confidence"]
+	reasons = result["reasons"]
+
+	backend_dividers, sys_flags = staves_to_dividers(systems, img_height)
+
+	# Cache the backend-pixel results (display-independent)
+	cache[page_num] = {
+		"confidence": confidence,
+		"reasons": reasons,
+		"stave_count": len(staves),
+		"system_count": len(systems),
+		"backend_dividers": backend_dividers,
+		"system_flags": sys_flags,
+	}
+
+	# Scale to display pixels
+	scale = display_width / img_width
+	display_dividers = [round(d * scale, 1) for d in backend_dividers]
+	strip_count = max(0, len(backend_dividers) - 1)
+
+	return jsonify({
+		"confidence": confidence,
+		"reasons": reasons,
+		"stave_count": len(staves),
+		"system_count": len(systems),
+		"dividers": display_dividers,
+		"system_flags": sys_flags,
+		"strip_names": [""] * strip_count,
+	})
+
+
+# --- Partition helpers ---
 
 def _build_known_sequence(real_strips: list[dict]) -> list[str]:
 	"""Extract the known instrument sequence from a page's first system.

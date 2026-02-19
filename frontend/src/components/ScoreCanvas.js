@@ -21,6 +21,8 @@ const ScoreCanvas = ({
   onRemoveMarking,
   containerRef,
   isRectSelecting,
+  isDetecting,
+  detectionWarning,
 }) => {
   return (
     <div className="border border-surface-border rounded-md overflow-hidden" style={{ width: pageWidth, flexShrink: 0 }}>
@@ -204,6 +206,26 @@ const ScoreCanvas = ({
             </button>
           </div>
         ))}
+
+        {/* Detection loading overlay */}
+        {isDetecting && (
+          <div className="absolute inset-0 bg-white/50 z-40 flex items-center justify-center pointer-events-none">
+            <div className="bg-white/90 rounded-lg px-4 py-3 shadow-sm flex items-center gap-3">
+              <svg className="animate-spin h-5 w-5 text-accent" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              <span className="text-sm text-gray-600">Detecting staves...</span>
+            </div>
+          </div>
+        )}
+
+        {/* Detection warning banner */}
+        {detectionWarning && !isDetecting && (
+          <div className="absolute top-2 left-2 right-2 z-40 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 text-xs text-yellow-700 pointer-events-none">
+            {detectionWarning}
+          </div>
+        )}
       </div>
     </div>
   );

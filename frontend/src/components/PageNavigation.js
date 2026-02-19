@@ -1,6 +1,6 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 
-const PageNavigation = ({ currentPage, pageCount, confirmedPages, onGoToPage }) => {
+const PageNavigation = ({ currentPage, pageCount, confirmedPages, detectedPages, onGoToPage }) => {
   if (pageCount <= 1) return null;
 
   return (
@@ -24,9 +24,15 @@ const PageNavigation = ({ currentPage, pageCount, confirmedPages, onGoToPage }) 
                 ? 'bg-accent ring-2 ring-accent/30'
                 : confirmedPages.has(i)
                   ? 'bg-success hover:bg-success/80'
-                  : 'bg-gray-300 hover:bg-gray-400'
+                  : detectedPages?.has(i)
+                    ? 'bg-accent/40 hover:bg-accent/60'
+                    : 'bg-gray-300 hover:bg-gray-400'
             }`}
-            title={`Page ${i + 1}${confirmedPages.has(i) ? ' (confirmed)' : ''}`}
+            title={`Page ${i + 1}${
+              confirmedPages.has(i) ? ' (confirmed)'
+              : detectedPages?.has(i) ? ' (auto-detected)'
+              : ''
+            }`}
           />
         ))}
       </div>
