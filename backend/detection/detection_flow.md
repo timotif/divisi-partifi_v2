@@ -2,45 +2,44 @@
 flowchart TD
     A([Page image]) --> B[binarize]
 
-    subgraph HORIZONTAL [Horizontal analysis]
-        B --> C[horizontal_projection]
-        C --> D[find_staff_line_peaks]
-        D --> E[cluster_into_staves]
-        E --> F[_squint_rescue]
-        F --> G[(staves)]
+    subgraph PHASE_A [Phase A — System band segmentation]
+        B --> A1[_barline_v_signal: ink per row in left margin]
+        A1 --> A2[_low_signal_runs: find near-zero stretches]
+        A2 --> A3[_merge_nearby_runs: bridge barline-end taper noise]
+        A3 --> A4{gaps found\nand bands large enough?}
+        A4 -- yes --> A5[(system_bands)]
+        A4 -- no --> A6[(single full-page band)]
     end
 
-    subgraph VERTICAL [Vertical analysis - system discovery]
-        B --> H[find_barline_x: leftmost inky cluster peak]
-        H --> I[_find_fine_barline_x: rightward scan, longest run]
-        I --> J[find_barline_runs: thin strip + h-dilation]
-        J --> K{2 or more runs?}
-        K -- yes --> L[_split_runs_into_systems]
-        L --> M[_cluster_by_barlines]
-        K -- no --> N[_cluster_by_gap: 2x median gap]
-        G --> M
-        G --> N
+    subgraph PHASE_B [Phase B — Per-band stave detection]
+        A5 --> B1[horizontal_projection per band]
+        A6 --> B1
+        B1 --> B2[find_staff_line_peaks]
+        B2 --> B3[cluster_into_staves]
+        B3 --> B4[_squint_rescue]
+        B4 --> B5[offset Y back to page space]
+        B5 --> B6[(all_staves)]
     end
 
-    M --> O[(candidate systems)]
-    N --> O
-
-    subgraph CONFIRMATION [Per-system confirmation]
-        O --> P[find_barline_x + _find_fine_barline_x per system]
-        P --> Q[detect_system_barlines: jitter strip + v-opening]
-        Q --> R{span covers 80pct of band?}
-        R -- yes --> S[confirmed]
-        R -- no --> T[unconfirmed]
+    subgraph PHASE_C [Phase C — System assembly]
+        B6 --> C1[assign staves to bands by centre Y]
+        A5 --> C1
+        C1 --> C2{stave balance\ncheck passes?}
+        C2 -- yes --> C3[per-system barline confirmation\nfind_barline_x + _find_fine_barline_x\n+ detect_system_barlines]
+        C3 --> C4[(systems + barline_info)]
+        C2 -- no --> C5[cluster_into_systems fallback\nbarline runs → _cluster_by_barlines\nor _cluster_by_gap]
+        A6 --> C5
+        C5 --> C4
     end
 
-    subgraph CONFIDENCE [Confidence scoring]
-        S --> U[_score_barlines: fraction confirmed]
-        O --> V[_score_gaps: consistent system sizes?]
-        G --> W[_score_stave_quality: orphan penalty]
-        U --> X[compute_confidence: 50pct barline + 25pct gap + 25pct stave + agreement bonus]
-        V --> X
-        W --> X
+    subgraph CONFIDENCE [Phase D — Confidence scoring]
+        C4 --> D1[_score_barlines: fraction confirmed]
+        C4 --> D2[_score_gaps: consistent system sizes?]
+        B6 --> D3[_score_stave_quality: orphan penalty]
+        D1 --> D4[compute_confidence\n50pct barline + 25pct gap + 25pct stave]
+        D2 --> D4
+        D3 --> D4
     end
 
-    X --> Y([confidence + systems + barline_info])
+    D4 --> E([confidence + systems + barline_info + system_bands])
 ```
