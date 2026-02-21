@@ -343,20 +343,164 @@ def _squint_rescue(projection, staves, orphans, expected_lines=5):
 # Step 6 — Cluster staves into systems
 # ---------------------------------------------------------------------------
 
-def cluster_into_systems(staves):
-    """Group staves into systems based on vertical gaps.
+def _typical_stave_span(staves):
+    """Median height (first to last line) across all staves."""
+    spans = [int(s[-1] - s[0]) for s in staves if len(s) >= 2]
+    return int(np.median(spans)) if spans else 40
 
-    Within a system, staves are closely spaced. Between systems there is a
-    larger gap (typically 2–3× the intra-system gap). We split at gaps
-    exceeding 2× the median.
+
+def find_barline_x(binary, y_top, y_bottom, search_ratio=0.6, min_ink_ratio=0.15):
+    """Rough barline x: leftmost cluster of inky columns, pick the peak.
+
+    Identifies all columns exceeding ``min_ink_ratio`` in the Y band, finds
+    the first cluster of adjacent candidates, and returns the one with the
+    highest ink count. This lands on the bracket/barline complex.
+
+    Args:
+        binary: ink=255 image from binarize().
+        y_top: top row of the band (inclusive).
+        y_bottom: bottom row of the band (inclusive).
+        search_ratio: only search the left fraction of the page width.
+        min_ink_ratio: minimum ink fraction to qualify as a candidate.
+
+    Returns:
+        x coordinate (int) of the cluster peak, or None if not found.
     """
+    h, w = binary.shape[:2]
+    y_top = max(0, y_top)
+    y_bottom = min(h - 1, y_bottom)
+    band_h = y_bottom - y_top + 1
+    search_w = int(w * search_ratio)
+    min_ink = int(band_h * min_ink_ratio)
+
+    band = binary[y_top:y_bottom + 1, :search_w]
+    v_projection = np.sum(band > 0, axis=0)
+    candidates = np.where(v_projection >= min_ink)[0]
+
+    if len(candidates) == 0:
+        return None
+
+    # First cluster of nearby candidates (gap <= 5px)
+    cluster = [candidates[0]]
+    for i in range(1, len(candidates)):
+        if candidates[i] - candidates[i - 1] <= 5:
+            cluster.append(candidates[i])
+        else:
+            break
+
+    return int(max(cluster, key=lambda x: v_projection[x]))
+
+
+def _find_fine_barline_x(binary, rough_x, y_top, y_bottom, search_right=30):
+    """Find the exact barline column by searching rightward from the rough x.
+
+    The barline is always to the right of the bracket. Scans each column
+    from ``rough_x`` rightward and picks the one with the longest unbroken
+    vertical ink run. The barline is thin (1–2px) and continuous; brackets
+    are wider but have gaps where they curve.
+
+    Args:
+        binary: ink=255 image from binarize().
+        rough_x: cluster peak from find_barline_x().
+        y_top: top row of the band.
+        y_bottom: bottom row of the band.
+        search_right: how many columns to search to the right of rough_x.
+
+    Returns:
+        (x, longest_run) for the best column, or (None, 0) if nothing found.
+    """
+    h, w = binary.shape[:2]
+    x0 = rough_x
+    x1 = min(w, rough_x + search_right + 1)
+    band = binary[y_top:y_bottom + 1, x0:x1]
+
+    best_x, best_run = None, 0
+    for col_idx in range(band.shape[1]):
+        col = band[:, col_idx] > 0
+        run, max_run = 0, 0
+        for v in col:
+            if v:
+                run += 1
+                if run > max_run:
+                    max_run = run
+            else:
+                run = 0
+        if max_run > best_run:
+            best_run = max_run
+            best_x = x0 + col_idx
+
+    return best_x, best_run
+
+
+def detect_system_barlines(binary, x_center, y_top, y_bottom, jitter=3,
+                           min_span_ratio=0.8):
+    """Confirm a system barline span via two-phase detection.
+
+    Phase 1 (fine x): find the exact barline column near ``x_center``.
+    Phase 2 (jitter-tolerant opening): take a thin strip (±jitter px) around
+    the fine x, dilate horizontally to bridge 1–2px wobble, then apply a
+    vertical morphological opening with a kernel equal to the band height.
+
+    Returns the refined (y_top, y_bottom) of the largest surviving component,
+    or None if nothing survives or the span is too short.
+
+    Args:
+        binary: ink=255 image from binarize().
+        x_center: rough barline column from find_barline_x().
+        y_top: top row of the system band.
+        y_bottom: bottom row of the system band.
+        jitter: half-width of the thin strip around the fine barline x.
+        min_span_ratio: minimum fraction of band height the barline must
+            span to count as confirmed (default 80%).
+    """
+    h, w = binary.shape[:2]
+    y_top = max(0, y_top)
+    y_bottom = min(h - 1, y_bottom)
+    band_h = y_bottom - y_top + 1
+
+    # Phase 1: find exact barline column
+    fine_x, _ = _find_fine_barline_x(binary, x_center, y_top, y_bottom)
+    if fine_x is None:
+        return None
+
+    # Phase 2: thin strip with horizontal dilation to bridge jitter
+    x0 = max(0, fine_x - jitter)
+    x1 = min(w, fine_x + jitter + 1)
+    strip = binary[y_top:y_bottom + 1, x0:x1].copy()
+
+    # Horizontal dilation bridges 1-2px wobble in the barline
+    h_kernel = cv.getStructuringElement(cv.MORPH_RECT, (jitter * 2 + 1, 1))
+    strip = cv.dilate(strip, h_kernel, iterations=1)
+
+    # Vertical opening: only strokes continuous for the full band survive
+    v_kernel = cv.getStructuringElement(cv.MORPH_RECT, (1, band_h))
+    opened = cv.morphologyEx(strip, cv.MORPH_OPEN, v_kernel)
+
+    num_labels, _, stats, _ = cv.connectedComponentsWithStats(opened, connectivity=8)
+
+    best = None
+    best_h = 0
+    for label in range(1, num_labels):
+        lh = stats[label, cv.CC_STAT_HEIGHT]
+        if lh > best_h:
+            best_h = lh
+            best = (
+                y_top + stats[label, cv.CC_STAT_TOP],
+                y_top + stats[label, cv.CC_STAT_TOP] + lh,
+            )
+
+    if best is not None and best_h < band_h * min_span_ratio:
+        return None
+
+    return best
+
+
+def _cluster_by_gap(staves):
+    """Split staves into systems at gaps exceeding 2× the median inter-stave gap."""
     if len(staves) <= 1:
         return [staves] if staves else []
 
     stave_gaps = [staves[i + 1][0] - staves[i][-1] for i in range(len(staves) - 1)]
-    if not stave_gaps:
-        return [staves]
-
     threshold = np.median(stave_gaps) * 2.0
     systems = []
     current_system = [staves[0]]
@@ -370,37 +514,267 @@ def cluster_into_systems(staves):
     return systems
 
 
+def _cluster_by_barlines(staves, barline_spans):
+    """Assign staves to systems by matching each stave's centre to a barline span.
+
+    Returns None if any stave cannot be matched (caller should fall back).
+
+    Args:
+        staves: list of stave arrays, sorted top-to-bottom.
+        barline_spans: list of (y_top, y_bottom) from detect_system_barlines().
+    """
+    tolerance = _typical_stave_span(staves) // 2
+    groups = [[] for _ in barline_spans]
+    for stave in staves:
+        centre = int((stave[0] + stave[-1]) / 2)
+        matched = False
+        for bi, (y_top, y_bot) in enumerate(barline_spans):
+            if y_top - tolerance <= centre <= y_bot + tolerance:
+                groups[bi].append(stave)
+                matched = True
+                break
+        if not matched:
+            return None
+    return [g for g in groups if g]
+
+
+def find_barline_runs(binary, fine_x, jitter=3, min_run_length=50):
+    """Find continuous vertical ink runs at the barline column (full page).
+
+    Scans a thin strip (±jitter) around ``fine_x`` with horizontal dilation
+    to bridge 1-2px wobble, then returns each contiguous ink run.
+
+    Args:
+        binary: ink=255 image from binarize().
+        fine_x: exact barline column from _find_fine_barline_x().
+        jitter: half-width of the strip.
+        min_run_length: discard runs shorter than this (noise).
+
+    Returns:
+        list of (y_top, y_bottom) runs, sorted top-to-bottom.
+    """
+    h, w = binary.shape[:2]
+    x0 = max(0, fine_x - jitter)
+    x1 = min(w, fine_x + jitter + 1)
+    strip = binary[:, x0:x1].copy()
+
+    h_kernel = cv.getStructuringElement(cv.MORPH_RECT, (jitter * 2 + 1, 1))
+    strip = cv.dilate(strip, h_kernel, iterations=1)
+
+    col = np.any(strip > 0, axis=1)
+    runs = []
+    start = None
+    for i, v in enumerate(col):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            if i - start >= min_run_length:
+                runs.append((start, i - 1))
+            start = None
+    if start is not None and h - start >= min_run_length:
+        runs.append((start, h - 1))
+
+    return runs
+
+
+def _split_runs_into_systems(runs, staves):
+    """Group barline runs into system spans by gap size.
+
+    Each run is a continuous ink segment of the barline. Gaps between runs
+    are classified: large gaps (> 2× median) are system boundaries, small
+    gaps are intra-system breaks (e.g. between instrument families). With
+    only 2 runs, the single gap is always a system boundary.
+
+    A typical stave span is used as a minimum gap threshold to avoid
+    splitting on tiny noise gaps.
+
+    Returns:
+        list of (y_top, y_bottom) system spans, sorted top-to-bottom.
+    """
+    if len(runs) <= 1:
+        return list(runs)
+
+    gaps = [runs[i + 1][0] - runs[i][1] for i in range(len(runs) - 1)]
+
+    if len(gaps) == 1:
+        # Two runs = two systems, always split
+        return list(runs)
+
+    # Multiple gaps: split at gaps > 2× median, but at least 1 stave span
+    min_gap = _typical_stave_span(staves) if staves else 40
+    threshold = max(np.median(gaps) * 2.0, min_gap)
+
+    spans = []
+    span_start = runs[0][0]
+    for i, gap in enumerate(gaps):
+        if gap > threshold:
+            spans.append((span_start, runs[i][1]))
+            span_start = runs[i + 1][0]
+    spans.append((span_start, runs[-1][1]))
+
+    return spans
+
+
+def cluster_into_systems(staves, binary=None):
+    """Group staves into systems.
+
+    Primary: find the barline on the full page, find where it breaks, use
+    breaks as system boundaries. Fallback: gap heuristic on stave positions.
+
+    After grouping, each system is confirmed by checking that a continuous
+    barline spans it (morphological opening).
+
+    Args:
+        staves: list of stave arrays, sorted top-to-bottom.
+        binary: optional binarized image for barline detection.
+
+    Returns:
+        systems: list of lists of stave arrays.
+        barline_info: list of {'x', 'span'} per system ('span' is None
+            for unconfirmed systems).
+    """
+    if not staves:
+        return [], []
+
+    systems = None
+    fine_x = None
+
+    # Primary: barline-based grouping on full page
+    if binary is not None:
+        h, w = binary.shape[:2]
+        rough_x = find_barline_x(binary, 0, h - 1)
+        if rough_x is not None:
+            fine_x, _ = _find_fine_barline_x(binary, rough_x, 0, h - 1)
+        if fine_x is not None:
+            runs = find_barline_runs(binary, fine_x)
+            if len(runs) >= 2:
+                system_spans = _split_runs_into_systems(runs, staves)
+                systems = _cluster_by_barlines(staves, system_spans)
+
+    # Fallback: gap heuristic
+    if systems is None:
+        systems = _cluster_by_gap(staves)
+
+    # Confirm each system individually with per-system barline x
+    barline_info = []
+    if binary is not None:
+        for system in systems:
+            y_top = int(system[0][0])
+            y_bottom = int(system[-1][-1])
+            rough = find_barline_x(binary, y_top, y_bottom)
+            if rough is None:
+                barline_info.append({'x': None, 'span': None})
+                continue
+            x, _ = _find_fine_barline_x(binary, rough, y_top, y_bottom)
+            if x is None:
+                barline_info.append({'x': None, 'span': None})
+                continue
+            span = detect_system_barlines(binary, x, y_top, y_bottom)
+            barline_info.append({'x': x, 'span': span})
+    else:
+        barline_info = [{'x': None, 'span': None}] * len(systems)
+
+    return systems, barline_info
+
+
 # ---------------------------------------------------------------------------
 # Step 7 — Confidence scoring
 # ---------------------------------------------------------------------------
 
-def compute_confidence(systems, staves, orphans, total_peaks):
-    """Score detection quality from 0–1 with human-readable explanations."""
+def _score_gaps(systems):
+    """Score the gap-heuristic grouping quality (0.0–1.0).
+
+    Checks for clean separation: consistent system sizes and no singleton
+    systems. A single system on a page is not penalized.
+    """
+    score = 1.0
+    reasons = []
+
+    if len(systems) > 1:
+        system_sizes = [len(s) for s in systems]
+        if len(set(system_sizes)) > 1:
+            score -= 0.3
+            reasons.append(f"Inconsistent system sizes: {system_sizes}")
+
+    if any(len(s) < 2 for s in systems):
+        score -= 0.4
+        reasons.append("System with fewer than 2 staves")
+
+    return max(0.0, score), reasons
+
+
+def _score_barlines(barline_info):
+    """Score the barline confirmation (0.0–1.0).
+
+    Each confirmed system adds equally; no confirmed systems → 0.0.
+    """
+    if not barline_info:
+        return 0.0, ["No barline analysis performed"]
+
+    confirmed = sum(1 for info in barline_info if info.get('span') is not None)
+    total = len(barline_info)
+    score = confirmed / total
+
+    if confirmed == total:
+        reasons = [f"All {total} systems confirmed by barlines"]
+    elif confirmed == 0:
+        reasons = [f"No barlines found (0/{total} systems)"]
+    else:
+        reasons = [f"Barlines found for {confirmed}/{total} systems"]
+
+    return score, reasons
+
+
+def _score_stave_quality(staves, orphans, total_peaks):
+    """Score individual stave integrity (0.0–1.0).
+
+    Penalizes orphan peaks (lines that didn't fit into a 5-line stave).
+    """
     if not staves:
         return 0.0, ["No staves detected"]
 
     score = 1.0
     reasons = []
 
-    # Orphan penalty (peaks that couldn't be grouped)
     if orphans:
-        orphan_ratio = len(orphans) / total_peaks
-        score -= min(0.3, orphan_ratio)
+        orphan_ratio = len(orphans) / total_peaks if total_peaks > 0 else 0
+        score -= min(0.5, orphan_ratio * 2)
         reasons.append(f"{len(orphans)} orphan lines ({orphan_ratio:.0%} of detected)")
 
-    # Inconsistent system sizes (e.g. [5, 5, 9] on a page with mixed layouts)
-    if len(systems) > 1:
-        system_sizes = [len(s) for s in systems]
-        if len(set(system_sizes)) > 1:
-            score -= 0.15
-            reasons.append(f"Inconsistent system sizes: {system_sizes}")
-
-    # Systems with fewer than 2 staves are suspicious
-    if any(len(s) < 2 for s in systems):
-        score -= 0.2
-        reasons.append("System with fewer than 2 staves")
-
     return max(0.0, score), reasons
+
+
+def compute_confidence(systems, staves, orphans, total_peaks, barline_info):
+    """Combine three independent quality signals into an overall confidence.
+
+    Step 1 (gap grouping) and step 2 (barline confirmation) each contribute
+    to system-level confidence; step 3 (stave quality) contributes to
+    stave-level confidence. When steps 1 and 2 agree, confidence is high.
+
+    Weights:
+        - Gap + barline agreement: 50% (system identity)
+        - Barline confirmation:    25% (structural validation)
+        - Stave quality:           25% (individual stave integrity)
+    """
+    if not staves:
+        return 0.0, {"gap": (0, []), "barlines": (0, []), "staves": (0, [])}
+
+    gap_score, gap_reasons = _score_gaps(systems)
+    bar_score, bar_reasons = _score_barlines(barline_info)
+    stave_score, stave_reasons = _score_stave_quality(staves, orphans, total_peaks)
+
+    confidence = gap_score * 0.25 + bar_score * 0.50 + stave_score * 0.25
+
+    # Agreement bonus: if both gap and barline are strong, boost confidence
+    if gap_score >= 0.7 and bar_score >= 1.0:
+        confidence = min(1.0, confidence + 0.1)
+
+    detail = {
+        "gap": (gap_score, gap_reasons),
+        "barlines": (bar_score, bar_reasons),
+        "staves": (stave_score, stave_reasons),
+    }
+    return min(1.0, confidence), detail
 
 
 # ---------------------------------------------------------------------------
@@ -439,8 +813,17 @@ def detect_staves(source, page_num=0):
     staves, orphans = _squint_rescue(projection, staves, orphans)
     staves.sort(key=lambda s: s[0])
 
-    systems = cluster_into_systems(staves)
-    confidence, reasons = compute_confidence(systems, staves, orphans, len(peaks))
+    systems, barline_info = cluster_into_systems(staves, binary)
+    confidence, confidence_detail = compute_confidence(
+        systems, staves, orphans, len(peaks), barline_info
+    )
+
+    # Flatten detail into a reasons list for API backward compat
+    reasons = []
+    for key in ("gap", "barlines", "staves"):
+        if key in confidence_detail:
+            _, detail_reasons = confidence_detail[key]
+            reasons.extend(detail_reasons)
 
     return {
         "img": img,
@@ -450,8 +833,10 @@ def detect_staves(source, page_num=0):
         "peaks": peaks,
         "staves": staves,
         "systems": systems,
+        "barline_info": barline_info,
         "orphans": orphans,
         "confidence": confidence,
+        "confidence_detail": confidence_detail,
         "reasons": reasons,
     }
 
@@ -461,7 +846,7 @@ def detect_staves(source, page_num=0):
 # ---------------------------------------------------------------------------
 
 def plot_results(result):
-    """Three-panel plot: annotated image, projection profile, text summary."""
+    """Four-panel plot: annotated image, H-projection, V-projection, text summary."""
     import matplotlib
     matplotlib.use('TkAgg')
     import matplotlib.pyplot as plt
@@ -474,13 +859,15 @@ def plot_results(result):
     systems = result["systems"]
     orphans = result["orphans"]
     confidence = result["confidence"]
-    reasons = result["reasons"]
+    confidence_detail = result.get("confidence_detail", {})
+    barline_info = result.get("barline_info", [])
+    binary = result["binary"]
 
     _, axes = plt.subplots(
-        1, 3, figsize=(20, 10), gridspec_kw={'width_ratios': [3, 1, 3]}
+        1, 4, figsize=(26, 10), gridspec_kw={'width_ratios': [3, 1, 1, 3]}
     )
 
-    # --- Left panel: score image with detected lines ---
+    # --- Panel 1: score image with detected lines and barline spans ---
     ax_img = axes[0]
     display = img.copy()
     if len(display.shape) == 2:
@@ -493,7 +880,7 @@ def plot_results(result):
         (255, 0, 255),  # magenta
         (0, 200, 200),  # cyan
     ]
-    _, w = display.shape[:2]
+    h, w = display.shape[:2]
 
     for sys_idx, system in enumerate(systems):
         color = system_colors[sys_idx % len(system_colors)]
@@ -507,22 +894,54 @@ def plot_results(result):
         for x in range(0, w, 20):
             cv.line(display, (x, y), (min(x + 10, w), y), (128, 128, 128), 1)
 
+    # Per-system barline: yellow vertical tick at detected x, magenta bracket for span
+    for info in barline_info:
+        bx = info.get('x')
+        span = info.get('span')
+        if bx is not None and span is not None:
+            y_top, y_bot = span
+            cv.line(display, (bx, y_top), (bx, y_bot), (0, 255, 255), 2)
+            rx = w - 10
+            cv.line(display, (rx - 10, y_top), (rx, y_top), (255, 0, 255), 3)
+            cv.line(display, (rx, y_top), (rx, y_bot), (255, 0, 255), 3)
+            cv.line(display, (rx - 10, y_bot), (rx, y_bot), (255, 0, 255), 3)
+
     ax_img.imshow(cv.cvtColor(display, cv.COLOR_BGR2RGB))
-    ax_img.set_title(f"Detected: {len(staves)} staves in {len(systems)} systems")
+    n_confirmed = sum(1 for info in barline_info if info.get('span'))
+    ax_img.set_title(
+        f"Detected: {len(staves)} staves in {len(systems)} systems "
+        f"({n_confirmed}/{len(systems)} barline-confirmed)"
+    )
     ax_img.axis('off')
 
-    # --- Middle panel: horizontal projection (Y-axis matches image) ---
-    ax_proj = axes[1]
+    # --- Panel 2: horizontal projection ---
+    ax_hproj = axes[1]
     y_axis = np.arange(len(projection))
-    ax_proj.plot(smoothed, y_axis, 'b-', linewidth=0.5, label='smoothed')
-    ax_proj.plot(projection, y_axis, 'b-', linewidth=0.3, alpha=0.3, label='raw')
-    ax_proj.plot(smoothed[peaks], peaks, 'rv', markersize=4, label='peaks')
-    ax_proj.set_ylim(len(projection), 0)
-    ax_proj.set_title("H-Projection")
-    ax_proj.legend(fontsize=8)
+    ax_hproj.plot(smoothed, y_axis, 'b-', linewidth=0.5, label='smoothed')
+    ax_hproj.plot(projection, y_axis, 'b-', linewidth=0.3, alpha=0.3, label='raw')
+    ax_hproj.plot(smoothed[peaks], peaks, 'rv', markersize=4, label='peaks')
+    ax_hproj.set_ylim(len(projection), 0)
+    ax_hproj.set_title("H-Projection")
+    ax_hproj.legend(fontsize=8)
 
-    # --- Right panel: text summary ---
-    ax_text = axes[2]
+    # --- Panel 3: vertical projection with per-system barline x marked ---
+    ax_vproj = axes[2]
+    v_projection = np.sum(binary > 0, axis=0).astype(np.float64)
+    x_axis = np.arange(len(v_projection))
+    ax_vproj.plot(x_axis, v_projection, 'g-', linewidth=0.5)
+    for i, info in enumerate(barline_info):
+        bx = info.get('x')
+        if bx is not None:
+            ax_vproj.axvline(bx, color='orange', linewidth=1.5,
+                             label=f'sys {i + 1} x={bx}')
+    if barline_info:
+        ax_vproj.legend(fontsize=8)
+    ax_vproj.set_title("V-Projection")
+    ax_vproj.set_xlabel("x (column)")
+    ax_vproj.set_ylabel("ink rows")
+
+    # --- Panel 4: text summary ---
+    ax_text = axes[3]
     ax_text.axis('off')
     lines = [
         f"Total peaks: {len(peaks)}",
@@ -532,15 +951,23 @@ def plot_results(result):
         "",
         f"Confidence:  {confidence:.0%}",
     ]
-    if reasons:
-        lines += ["", "Issues:"]
-        lines += [f"  - {r}" for r in reasons]
+    for key in ("gap", "barlines", "staves"):
+        if key in confidence_detail:
+            score, reasons = confidence_detail[key]
+            lines.append(f"  {key}: {score:.0%}")
+            for r in reasons:
+                lines.append(f"    - {r}")
     lines.append("")
     for i, system in enumerate(systems):
         sizes = [len(s) for s in system]
-        lines.append(f"System {i + 1}: {len(system)} staves ({sizes} lines each)")
+        confirmed = (i < len(barline_info) and barline_info[i].get('span'))
+        tag = " [barline]" if confirmed else ""
+        lines.append(f"System {i + 1}: {len(system)} staves{tag}")
         if system:
             lines.append(f"  Y range: {system[0][0]} – {system[-1][-1]}")
+        if confirmed:
+            y_top, y_bot = barline_info[i]['span']
+            lines.append(f"  Barline x={barline_info[i]['x']}  span {y_top}–{y_bot}")
 
     ax_text.text(
         0.05, 0.95, "\n".join(lines),
@@ -562,27 +989,37 @@ def _print_summary(result, label):
     print(f"  Peaks: {len(result['peaks'])}, Staves: {len(result['staves'])}, "
           f"Systems: {len(result['systems'])}, Orphans: {len(result['orphans'])}")
     print(f"  Confidence: {result['confidence']:.0%}")
-    for r in result["reasons"]:
-        print(f"    - {r}")
+    detail = result.get("confidence_detail", {})
+    for key in ("gap", "barlines", "staves"):
+        if key in detail:
+            score, reasons = detail[key]
+            print(f"    {key}: {score:.0%}")
+            for r in reasons:
+                print(f"      - {r}")
 
 
 def main():
-    """Usage: python projection.py [image_or_pdf] [page_num]
+    """Usage: python projection.py [image_or_pdf] [page_num] [--no-plot]
 
     Examples:
-        python projection.py                          # default test image
-        python projection.py score.png                # single image
-        python projection.py score.pdf                # first page of PDF
-        python projection.py score.pdf 3              # page 3 (0-based)
+        python projection.py                               # default test image
+        python projection.py score.png                     # single image
+        python projection.py score.pdf                     # first page of PDF
+        python projection.py score.pdf 3                   # page 3 (0-based)
+        python projection.py score.pdf 0 --no-plot         # summary only
     """
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    no_plot = '--no-plot' in sys.argv
+
     default_img = str(
         __import__("pathlib").Path(__file__).resolve().parent.parent / "img" / "music.png"
     )
-    source = sys.argv[1] if len(sys.argv) > 1 else default_img
-    page_num = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    source = args[0] if args else default_img
+    page_num = int(args[1]) if len(args) > 1 else 0
     result = detect_staves(source, page_num=page_num)
     _print_summary(result, source)
-    plot_results(result)
+    if not no_plot:
+        plot_results(result)
 
 
 if __name__ == "__main__":
