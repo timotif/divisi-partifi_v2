@@ -5,10 +5,11 @@ Can be used as a library or run directly for visual debugging:
 
 Pipeline (4 phases):
     A. Left-margin vertical signal → system band segmentation (primary)
-       - Sum ink per row in leftmost 15% of page (bracket/barline zone)
-       - Two-pass gap detection: find low-signal runs, bridge bracket-serif
-         bleed (≤25px noise bursts), apply min_gap threshold
-       - Each gap = inter-system boundary; remaining regions = system bands
+       - Sum ink per row in leftmost 15% of page (initial-barline zone)
+       - Find near-zero runs; merge fragments closer than 1.5× stave span
+         (bridges intra-system noise without joining distinct inter-system gaps)
+       - Discard merged gaps that contain H-projection peaks (label zones)
+       - Each surviving gap = inter-system boundary; regions between = system bands
     B. Per-band horizontal projection → staves
        - For each system band: H-projection on crop → peak detection →
          cluster into 5-line staves (repair/trim/split as needed)
@@ -462,7 +463,7 @@ def _gaps_to_bands(gaps, page_height, min_band_px):
 
 
 def left_margin_v_bands(binary, projection, margin_ratio=0.15, threshold_ratio=0.10,
-                        min_gap_px=20, noise_bridge_px=25, min_band_px=80):
+                        min_gap_px=20, min_band_px=80):
     """Segment page into system bands using the initial barline signal.
 
     The initial barline is a single continuous vertical line present at the
@@ -475,6 +476,13 @@ def left_margin_v_bands(binary, projection, margin_ratio=0.15, threshold_ratio=0
     peaks are used to discard those false gaps: a genuine inter-system gap
     has no peaks inside it.
 
+    The noise bridge — how far apart two zero-runs can be before they are
+    treated as separate gaps — is derived from the typical stave span rather
+    than hardcoded. Any two fragments separated by less than one stave span
+    are merged before the peak filter runs, so intra-system signal noise
+    never produces spurious band boundaries. This scales with DPI and score
+    layout automatically.
+
     Returns [(0, h-1)] (full page as one band) when no real gaps are found —
     caller falls back to cluster_into_systems().
 
@@ -484,8 +492,6 @@ def left_margin_v_bands(binary, projection, margin_ratio=0.15, threshold_ratio=0
         margin_ratio: fraction of page width to scan (default 0.15).
         threshold_ratio: fraction of strip median below which a row is "no ink".
         min_gap_px: minimum gap length to count as a system boundary (20px ≈ 1.7mm).
-        noise_bridge_px: merge gap fragments closer than this (handles barline-end
-            taper noise at system boundaries, typically < 25px).
         min_band_px: discard bands narrower than this.
     """
     h = binary.shape[0]
@@ -502,6 +508,18 @@ def left_margin_v_bands(binary, projection, margin_ratio=0.15, threshold_ratio=0
     if not low_runs:
         return [(0, h - 1)]
 
+    # Compute noise_bridge_px from the typical stave span so it scales with
+    # DPI and score layout instead of relying on a hardcoded value.
+    peaks, _ = find_staff_line_peaks(projection)
+    staves, _ = cluster_into_staves(peaks)
+    if staves:
+        typical_span = int(np.median([s[-1] - s[0] for s in staves]))
+    elif len(peaks) >= 5:
+        typical_span = int(peaks[4] - peaks[0])  # first-stave span estimate
+    else:
+        typical_span = 40  # safe fallback: ~4mm at 300 DPI
+    noise_bridge_px = int(typical_span * 1.5)
+
     merged = _merge_nearby_runs(low_runs, noise_bridge_px)
     gaps = [(s, e) for s, e in merged if e - s + 1 >= min_gap_px]
     if not gaps:
@@ -509,7 +527,6 @@ def left_margin_v_bands(binary, projection, margin_ratio=0.15, threshold_ratio=0
 
     # Discard gaps that contain staff-line peaks — those are label zones,
     # not genuine inter-system whitespace.
-    peaks, _ = find_staff_line_peaks(projection)
     gaps = _filter_gaps_by_peaks(gaps, peaks)
     if not gaps:
         return [(0, h - 1)]
