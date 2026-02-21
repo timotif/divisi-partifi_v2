@@ -1,20 +1,23 @@
-"""Horizontal projection profile for staff line detection.
+"""Staff line detection via left-margin vertical signal + per-band H-projection.
 
 Can be used as a library or run directly for visual debugging:
     python projection.py [image_or_pdf] [page_num]
 
-Pipeline:
-    1. Binarize (grayscale + Otsu threshold)
-    2. Horizontal projection (sum ink pixels per row → 1D signal)
-    3. Peak detection (scipy.find_peaks on smoothed projection)
-    4. Cluster peaks into staves (groups of 5 with regular spacing)
-       - Repair groups of 3–4 by interpolating missing lines
-       - Trim groups of 6 by dropping the worst-fitting line
-       - Split oversized groups into stave-sized chunks
-    5. "Squint" rescue pass: heavy blur merges each stave's 5 lines into
-       one broad hill, then synthesize staves for uncovered hills
-    6. Cluster staves into systems (large inter-stave gaps)
-    7. Confidence scoring with explanations
+Pipeline (4 phases):
+    A. Left-margin vertical signal → system band segmentation (primary)
+       - Sum ink per row in leftmost 15% of page (bracket/barline zone)
+       - Two-pass gap detection: find low-signal runs, bridge bracket-serif
+         bleed (≤25px noise bursts), apply min_gap threshold
+       - Each gap = inter-system boundary; remaining regions = system bands
+    B. Per-band horizontal projection → staves
+       - For each system band: H-projection on crop → peak detection →
+         cluster into 5-line staves (repair/trim/split as needed)
+       - "Squint" rescue: heavy blur finds staves missed by peak detection
+    C. System assembly
+       - Primary: assign staves to bands by centre Y
+       - Fallback (single band): barline-runs segmentation + gap heuristic
+         via cluster_into_systems()
+    D. Confidence scoring with explanations
 """
 
 import sys
@@ -340,7 +343,183 @@ def _squint_rescue(projection, staves, orphans, expected_lines=5):
 
 
 # ---------------------------------------------------------------------------
-# Step 6 — Cluster staves into systems
+# Step 6 — Left-margin vertical signal → system band segmentation
+# ---------------------------------------------------------------------------
+
+def _barline_v_signal(binary, margin_ratio=0.15):
+    """Count ink pixels per row in the left margin (barline zone).
+
+    The initial barline is a single thin vertical line that runs the full
+    height of each system and stops completely between systems. Scanning
+    just the left margin gives a 1D signal: high inside systems, near-zero
+    in the inter-system gaps.
+
+    Args:
+        binary: ink=255 image from binarize().
+        margin_ratio: fraction of page width to scan (default 0.15).
+            Wide enough to capture the barline even when the first system
+            is shifted right by instrument labels.
+
+    Returns:
+        1D float64 array of length = image height.
+    """
+    h, w = binary.shape[:2]
+    margin_w = max(1, int(w * margin_ratio))
+    return np.sum(binary[:, :margin_w] > 0, axis=1).astype(np.float64)
+
+
+def _low_signal_runs(signal, threshold, min_run_px=5):
+    """Return all runs of consecutive below-threshold values >= min_run_px.
+
+    Args:
+        signal: 1D array.
+        threshold: values strictly below this are "low".
+        min_run_px: discard runs shorter than this (sub-pixel noise).
+
+    Returns:
+        List of (y_start, y_end) inclusive ranges, sorted top-to-bottom.
+    """
+    runs = []
+    start = None
+    for y, val in enumerate(signal):
+        if val < threshold:
+            if start is None:
+                start = y
+        else:
+            if start is not None:
+                if y - start >= min_run_px:
+                    runs.append((start, y - 1))
+                start = None
+    if start is not None and len(signal) - start >= min_run_px:
+        runs.append((start, len(signal) - 1))
+    return runs
+
+
+def _merge_nearby_runs(runs, max_gap_px):
+    """Merge consecutive runs separated by <= max_gap_px of non-low signal.
+
+    Handles barline-end noise: the barline tapers at system boundaries,
+    leaving a few scattered pixels that fragment what is really one gap.
+
+    Args:
+        runs: list of (start, end) from _low_signal_runs().
+        max_gap_px: merge runs closer than this.
+
+    Returns:
+        List of merged (start, end) ranges.
+    """
+    if not runs:
+        return []
+    merged = [list(runs[0])]
+    for s, e in runs[1:]:
+        if s - merged[-1][1] - 1 <= max_gap_px:
+            merged[-1][1] = e
+        else:
+            merged.append([s, e])
+    return [(s, e) for s, e in merged]
+
+
+def _filter_gaps_by_peaks(gaps, peaks):
+    """Keep only gaps that contain no H-projection peaks.
+
+    A gap in the left-margin signal is a genuine inter-system boundary only
+    if no staff lines cross it. Label zones (instrument names, clef/key/time
+    signatures on the first system) create a fragmented barline signal that
+    looks like gaps, but staff lines are still present — H-projection peaks
+    expose this.
+
+    Args:
+        gaps: list of (start, end) candidate gap ranges.
+        peaks: array of Y positions from find_staff_line_peaks().
+
+    Returns:
+        Filtered list of gaps that contain zero peaks.
+    """
+    peak_set = set(int(p) for p in peaks)
+    return [(s, e) for s, e in gaps if not any(s <= p <= e for p in peak_set)]
+
+
+def _gaps_to_bands(gaps, page_height, min_band_px):
+    """Convert gap ranges to the content bands between them.
+
+    Args:
+        gaps: list of (gap_start, gap_end) sorted top-to-bottom.
+        page_height: total image height.
+        min_band_px: discard bands narrower than this.
+
+    Returns:
+        List of (y_top, y_bottom) band ranges.
+    """
+    bands = []
+    prev_end = 0
+    for g_start, g_end in gaps:
+        if g_start > prev_end:
+            bands.append((prev_end, g_start - 1))
+        prev_end = g_end + 1
+    if prev_end < page_height:
+        bands.append((prev_end, page_height - 1))
+    return [(a, b) for a, b in bands if b - a >= min_band_px]
+
+
+def left_margin_v_bands(binary, projection, margin_ratio=0.15, threshold_ratio=0.10,
+                        min_gap_px=20, noise_bridge_px=25, min_band_px=80):
+    """Segment page into system bands using the initial barline signal.
+
+    The initial barline is a single continuous vertical line present at the
+    left edge of every system. It stops completely between systems, so the
+    ink count per row in the left margin is a reliable segmenter: high inside
+    systems, near-zero in the gaps between them.
+
+    Label zones (instrument names + clef/key/time on the first system) look
+    like gaps in the barline signal but contain staff lines. H-projection
+    peaks are used to discard those false gaps: a genuine inter-system gap
+    has no peaks inside it.
+
+    Returns [(0, h-1)] (full page as one band) when no real gaps are found —
+    caller falls back to cluster_into_systems().
+
+    Args:
+        binary: ink=255 image from binarize().
+        projection: full-page horizontal projection from horizontal_projection().
+        margin_ratio: fraction of page width to scan (default 0.15).
+        threshold_ratio: fraction of strip median below which a row is "no ink".
+        min_gap_px: minimum gap length to count as a system boundary (20px ≈ 1.7mm).
+        noise_bridge_px: merge gap fragments closer than this (handles barline-end
+            taper noise at system boundaries, typically < 25px).
+        min_band_px: discard bands narrower than this.
+    """
+    h = binary.shape[0]
+
+    signal = _barline_v_signal(binary, margin_ratio)
+
+    nonzero = signal[signal > 0]
+    if len(nonzero) == 0:
+        return [(0, h - 1)]
+
+    threshold = np.median(nonzero) * threshold_ratio
+
+    low_runs = _low_signal_runs(signal, threshold)
+    if not low_runs:
+        return [(0, h - 1)]
+
+    merged = _merge_nearby_runs(low_runs, noise_bridge_px)
+    gaps = [(s, e) for s, e in merged if e - s + 1 >= min_gap_px]
+    if not gaps:
+        return [(0, h - 1)]
+
+    # Discard gaps that contain staff-line peaks — those are label zones,
+    # not genuine inter-system whitespace.
+    peaks, _ = find_staff_line_peaks(projection)
+    gaps = _filter_gaps_by_peaks(gaps, peaks)
+    if not gaps:
+        return [(0, h - 1)]
+
+    bands = _gaps_to_bands(gaps, h, min_band_px)
+    return bands if bands else [(0, h - 1)]
+
+
+# ---------------------------------------------------------------------------
+# Step 7 — Cluster staves into systems (fallback)
 # ---------------------------------------------------------------------------
 
 def _typical_stave_span(staves):
@@ -678,7 +857,7 @@ def cluster_into_systems(staves, binary=None):
 
 
 # ---------------------------------------------------------------------------
-# Step 7 — Confidence scoring
+# Step 8 — Confidence scoring
 # ---------------------------------------------------------------------------
 
 def _score_gaps(systems):
@@ -781,8 +960,15 @@ def compute_confidence(systems, staves, orphans, total_peaks, barline_info):
 # Full pipeline
 # ---------------------------------------------------------------------------
 
-def detect_staves(source, page_num=0):
+def detect_staves(source, page_num=0) -> dict:
     """Run the full detection pipeline.
+
+    Pipeline (4 phases):
+      A. Left-margin vertical signal → system band segmentation (primary).
+      B. Per-band horizontal projection → peaks → staves → squint rescue.
+      C. System assembly: staves assigned to bands (primary) or
+         barline-runs + gap heuristic via cluster_into_systems() (fallback).
+      D. Confidence scoring.
 
     Args:
         source: file path (PNG/JPG/PDF) or a numpy array (BGR image).
@@ -791,7 +977,8 @@ def detect_staves(source, page_num=0):
 
     Returns a dict with all intermediate results:
         img, binary, projection, smoothed, peaks, staves, systems,
-        orphans, confidence, reasons.
+        barline_info, orphans, confidence, confidence_detail, reasons,
+        system_bands (new: phase-A band extents for diagnostics).
     """
     if isinstance(source, np.ndarray):
         img = source
@@ -805,17 +992,83 @@ def detect_staves(source, page_num=0):
     binary = binarize(img)
     projection = horizontal_projection(binary)
 
-    # Pass 1: precise peak-based detection
+    # --- Phase A: system band segmentation via left-margin vertical signal ---
+    system_bands = left_margin_v_bands(binary, projection)
+
+    # --- Phase B: per-band H-detection (peaks → staves → squint rescue) ---
+    all_staves = []
+    all_orphans = []
+
+    for y_top, y_bottom in system_bands:
+        band_proj = projection[y_top:y_bottom + 1]
+
+        # All coords are band-relative here — squint must see matching arrays
+        peaks_band, _ = find_staff_line_peaks(band_proj)
+        staves_band, orphans_band = cluster_into_staves(peaks_band)
+        staves_band, orphans_band = _squint_rescue(band_proj, staves_band, orphans_band)
+
+        # Offset to full-image Y space
+        all_staves.extend(s + y_top for s in staves_band)
+        all_orphans.extend(o + y_top for o in orphans_band)
+
+    all_staves.sort(key=lambda s: s[0])
+
+    # Full-page peaks retained for confidence scoring (orphan ratio denominator)
     peaks, smoothed = find_staff_line_peaks(projection)
-    staves, orphans = cluster_into_staves(peaks)
 
-    # Pass 2: "squint" rescue for staves missed at low resolution
-    staves, orphans = _squint_rescue(projection, staves, orphans)
-    staves.sort(key=lambda s: s[0])
+    # --- Phase C: system assembly ---
+    systems = None
+    barline_info = None
 
-    systems, barline_info = cluster_into_systems(staves, binary)
+    if len(system_bands) > 1:
+        # Assign each stave to its band by centre Y
+        system_groups = [[] for _ in system_bands]
+        for stave in all_staves:
+            centre = int((stave[0] + stave[-1]) / 2)
+            for bi, (yt, yb) in enumerate(system_bands):
+                if yt <= centre <= yb:
+                    system_groups[bi].append(stave)
+                    break
+
+        systems_candidate = [g for g in system_groups if g]
+        # Sanity check: reject if any system has fewer than 70% of the median
+        # stave count — indicates a misplaced band boundary that cut a system
+        # in two (bracket serif bleed shifted the gap into the wrong place).
+        if systems_candidate:
+            sizes = [len(g) for g in systems_candidate]
+            median_size = np.median(sizes)
+            if median_size > 0 and min(sizes) < median_size * 0.7:
+                systems_candidate = []  # fall through to cluster_into_systems
+        if systems_candidate:
+            systems = systems_candidate
+            # Per-system barline confirmation.
+            # Use stave extents (first stave top → last stave bottom) as the
+            # confirmation band: detect_system_barlines uses a morphological
+            # opening whose kernel equals the band height, so the band must
+            # tightly match the actual barline span (not the wider v-band).
+            barline_info = []
+            for sys_staves in systems:
+                yt = int(sys_staves[0][0])
+                yb = int(sys_staves[-1][-1])
+                rough = find_barline_x(binary, yt, yb)
+                if rough is None:
+                    barline_info.append({'x': None, 'span': None})
+                    continue
+                # search_right=60 handles label pages where bracket is pushed right
+                fx, _ = _find_fine_barline_x(binary, rough, yt, yb, search_right=60)
+                if fx is None:
+                    barline_info.append({'x': None, 'span': None})
+                    continue
+                span = detect_system_barlines(binary, fx, yt, yb)
+                barline_info.append({'x': fx, 'span': span})
+
+    # Fallback: barline-runs approach + gap heuristic
+    if systems is None:
+        systems, barline_info = cluster_into_systems(all_staves, binary)
+
+    # --- Phase D: confidence scoring ---
     confidence, confidence_detail = compute_confidence(
-        systems, staves, orphans, len(peaks), barline_info
+        systems, all_staves, all_orphans, len(peaks), barline_info
     )
 
     # Flatten detail into a reasons list for API backward compat
@@ -831,13 +1084,14 @@ def detect_staves(source, page_num=0):
         "projection": projection,
         "smoothed": smoothed,
         "peaks": peaks,
-        "staves": staves,
+        "staves": all_staves,
         "systems": systems,
         "barline_info": barline_info,
-        "orphans": orphans,
+        "orphans": all_orphans,
         "confidence": confidence,
         "confidence_detail": confidence_detail,
         "reasons": reasons,
+        "system_bands": system_bands,
     }
 
 
@@ -846,7 +1100,7 @@ def detect_staves(source, page_num=0):
 # ---------------------------------------------------------------------------
 
 def plot_results(result):
-    """Four-panel plot: annotated image, H-projection, V-projection, text summary."""
+    """Four-panel plot: annotated image, H-projection, barline signal, text summary."""
     import matplotlib
     matplotlib.use('TkAgg')
     import matplotlib.pyplot as plt
@@ -861,84 +1115,119 @@ def plot_results(result):
     confidence = result["confidence"]
     confidence_detail = result.get("confidence_detail", {})
     barline_info = result.get("barline_info", [])
+    system_bands = result.get("system_bands", [])
     binary = result["binary"]
+
+    # matplotlib colors (RGB 0-1) and OpenCV colors (BGR 0-255) kept in sync
+    mpl_colors = [
+        (0.9, 0.1, 0.1),   # red
+        (0.0, 0.7, 0.1),   # green
+        (0.0, 0.4, 1.0),   # blue
+        (0.9, 0.0, 0.9),   # magenta
+        (0.0, 0.75, 0.75), # cyan
+    ]
+    cv_colors = [
+        (30,  30,  230),  # red
+        (30,  180, 30),   # green
+        (255, 100, 0),    # blue
+        (255, 0,   255),  # magenta
+        (200, 200, 0),    # cyan
+    ]
 
     _, axes = plt.subplots(
         1, 4, figsize=(26, 10), gridspec_kw={'width_ratios': [3, 1, 1, 3]}
     )
 
-    # --- Panel 1: score image with detected lines and barline spans ---
+    # --- Panel 1: score image ---
     ax_img = axes[0]
     display = img.copy()
     if len(display.shape) == 2:
         display = cv.cvtColor(display, cv.COLOR_GRAY2BGR)
-
-    system_colors = [
-        (255, 0, 0),    # red
-        (0, 180, 0),    # green
-        (0, 100, 255),  # orange
-        (255, 0, 255),  # magenta
-        (0, 200, 200),  # cyan
-    ]
     h, w = display.shape[:2]
 
+    # Staff lines and stave rectangles, coloured by system
     for sys_idx, system in enumerate(systems):
-        color = system_colors[sys_idx % len(system_colors)]
+        color = cv_colors[sys_idx % len(cv_colors)]
         for stave in system:
             for y in stave:
                 cv.line(display, (0, y), (w, y), color, 2)
-            cv.rectangle(display, (5, stave[0] - 5), (15, stave[-1] + 5), color, 2)
+            cv.rectangle(display, (5, int(stave[0]) - 5), (15, int(stave[-1]) + 5), color, 2)
 
-    # Orphans as gray dashed lines
+    # Orphans as gray dashes
     for y in orphans:
         for x in range(0, w, 20):
-            cv.line(display, (x, y), (min(x + 10, w), y), (128, 128, 128), 1)
+            cv.line(display, (x, int(y)), (min(x + 10, w), int(y)), (128, 128, 128), 1)
 
-    # Per-system barline: yellow vertical tick at detected x, magenta bracket for span
+    # Phase-A band boundaries: thin dotted lines across the full width
+    for band_idx, (ybt, ybb) in enumerate(system_bands):
+        color = cv_colors[band_idx % len(cv_colors)]
+        for x in range(0, w, 15):
+            cv.line(display, (x, ybt), (min(x + 8, w), ybt), color, 1)
+            cv.line(display, (x, ybb), (min(x + 8, w), ybb), color, 1)
+
+    # Confirmed barline span: cyan vertical tick at detected x
     for info in barline_info:
         bx = info.get('x')
         span = info.get('span')
         if bx is not None and span is not None:
             y_top, y_bot = span
             cv.line(display, (bx, y_top), (bx, y_bot), (0, 255, 255), 2)
-            rx = w - 10
-            cv.line(display, (rx - 10, y_top), (rx, y_top), (255, 0, 255), 3)
-            cv.line(display, (rx, y_top), (rx, y_bot), (255, 0, 255), 3)
-            cv.line(display, (rx - 10, y_bot), (rx, y_bot), (255, 0, 255), 3)
 
     ax_img.imshow(cv.cvtColor(display, cv.COLOR_BGR2RGB))
     n_confirmed = sum(1 for info in barline_info if info.get('span'))
     ax_img.set_title(
-        f"Detected: {len(staves)} staves in {len(systems)} systems "
+        f"Detected: {len(staves)} staves / {len(systems)} systems "
         f"({n_confirmed}/{len(systems)} barline-confirmed)"
     )
     ax_img.axis('off')
 
-    # --- Panel 2: horizontal projection ---
+    # --- Panel 2: H-projection with per-band coloured spans ---
     ax_hproj = axes[1]
     y_axis = np.arange(len(projection))
     ax_hproj.plot(smoothed, y_axis, 'b-', linewidth=0.5, label='smoothed')
     ax_hproj.plot(projection, y_axis, 'b-', linewidth=0.3, alpha=0.3, label='raw')
     ax_hproj.plot(smoothed[peaks], peaks, 'rv', markersize=4, label='peaks')
+    # Shade each system band so it's clear where per-band detection ran
+    for band_idx, (ybt, ybb) in enumerate(system_bands):
+        color = mpl_colors[band_idx % len(mpl_colors)]
+        ax_hproj.axhspan(ybt, ybb, alpha=0.12, color=color)
     ax_hproj.set_ylim(len(projection), 0)
-    ax_hproj.set_title("H-Projection")
+    ax_hproj.set_title("H-Projection\n(shaded = system bands)")
     ax_hproj.legend(fontsize=8)
 
-    # --- Panel 3: vertical projection with per-system barline x marked ---
-    ax_vproj = axes[2]
-    v_projection = np.sum(binary > 0, axis=0).astype(np.float64)
-    x_axis = np.arange(len(v_projection))
-    ax_vproj.plot(x_axis, v_projection, 'g-', linewidth=0.5)
+    # --- Panel 3: left-margin barline signal (the primary segmenter) ---
+    ax_vsig = axes[2]
+    v_signal = _barline_v_signal(binary)
+    y_axis_v = np.arange(len(v_signal))
+    ax_vsig.plot(v_signal, y_axis_v, color='steelblue', linewidth=0.6)
+
+    # Shade the gaps between bands (inter-system regions)
+    band_set = set()
+    for ybt, ybb in system_bands:
+        band_set.update(range(ybt, ybb + 1))
+    in_gap, gap_start = False, None
+    for y in range(len(v_signal) + 1):
+        is_gap = y < len(v_signal) and y not in band_set
+        if is_gap and not in_gap:
+            in_gap, gap_start = True, y
+        elif not is_gap and in_gap:
+            ax_vsig.axhspan(gap_start, y - 1, alpha=0.25, color='tomato', label='gap' if gap_start == (system_bands[0][1] + 1 if system_bands else 0) else '')
+            in_gap = False
+
+    # Mark confirmed barline x positions
     for i, info in enumerate(barline_info):
         bx = info.get('x')
         if bx is not None:
-            ax_vproj.axvline(bx, color='orange', linewidth=1.5,
-                             label=f'sys {i + 1} x={bx}')
+            ax_vsig.axvline(bx, color=mpl_colors[i % len(mpl_colors)],
+                            linewidth=1.2, linestyle='--',
+                            label=f'sys {i + 1} x={bx}')
+
+    ax_vsig.set_ylim(len(v_signal), 0)
+    ax_vsig.set_title("Left-margin signal\n(red = inter-system gaps)")
+    ax_vsig.set_xlabel("ink pixels / row")
+    ax_vsig.set_ylabel("y (row)")
     if barline_info:
-        ax_vproj.legend(fontsize=8)
-    ax_vproj.set_title("V-Projection")
-    ax_vproj.set_xlabel("x (column)")
-    ax_vproj.set_ylabel("ink rows")
+        ax_vsig.legend(fontsize=7)
 
     # --- Panel 4: text summary ---
     ax_text = axes[3]
@@ -948,6 +1237,7 @@ def plot_results(result):
         f"Staves:      {len(staves)}",
         f"Systems:     {len(systems)}",
         f"Orphans:     {len(orphans)}",
+        f"Bands (A):   {len(system_bands)}",
         "",
         f"Confidence:  {confidence:.0%}",
     ]
@@ -959,7 +1249,6 @@ def plot_results(result):
                 lines.append(f"    - {r}")
     lines.append("")
     for i, system in enumerate(systems):
-        sizes = [len(s) for s in system]
         confirmed = (i < len(barline_info) and barline_info[i].get('span'))
         tag = " [barline]" if confirmed else ""
         lines.append(f"System {i + 1}: {len(system)} staves{tag}")
@@ -968,6 +1257,8 @@ def plot_results(result):
         if confirmed:
             y_top, y_bot = barline_info[i]['span']
             lines.append(f"  Barline x={barline_info[i]['x']}  span {y_top}–{y_bot}")
+        if i < len(system_bands):
+            lines.append(f"  Band: {system_bands[i][0]}–{system_bands[i][1]}")
 
     ax_text.text(
         0.05, 0.95, "\n".join(lines),
