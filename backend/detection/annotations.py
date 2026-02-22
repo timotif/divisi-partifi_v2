@@ -504,19 +504,46 @@ def detect_instrument_labels(
             stave_bottom = min(img_height, int(stave[-1]) + 8)
 
             # Trim bracket ink from the right edge of the crop.
-            # The vertical ink profile (sum of ink pixels per column) has a
-            # clear blank gap between the text and the bracket complex.
-            # Find the rightmost all-zero column and use col+1 as the actual
-            # right boundary — this recovers trailing characters (e.g. the
-            # second "I" in "Violino II") that sit close to the bracket.
+            # The vertical ink profile (sum per column) has a clear blank gap
+            # between the label text and the bracket/barline complex.
+            # Strategy: find all blank runs (≥ _TRIM_MIN_BLANK consecutive zero
+            # columns), then pick the *widest* one — the text-to-bracket gap is
+            # always wider than any internal gap within the bracket complex
+            # (e.g. the gap between a curly brace and the barline).
+            _TRIM_MIN_BLANK = 3
             _, binary_strip = cv.threshold(
                 img[stave_top:stave_bottom, 0:scan_width],
                 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU,
             )
             col_ink = binary_strip.sum(axis=0)
-            blank_cols = np.where(col_ink == 0)[0]
-            if blank_cols.size > 0:
-                actual_right = int(blank_cols[-1]) + 1
+            ncols = len(col_ink)
+            # Enumerate all blank runs (start, length) left-to-right
+            blank_runs: list[tuple[int, int]] = []
+            i = 0
+            while i < ncols:
+                if col_ink[i] == 0:
+                    j = i
+                    while j < ncols and col_ink[j] == 0:
+                        j += 1
+                    run_len = j - i
+                    if run_len >= _TRIM_MIN_BLANK:
+                        blank_runs.append((i, run_len))
+                    i = j
+                else:
+                    i += 1
+            if blank_runs:
+                # Pick the rightmost blank run whose start is in the right
+                # half of the scan strip (i.e. after the text region).
+                # This skips the left-margin empty space before the text.
+                mid = ncols // 2
+                right_half_runs = [(s, l) for s, l in blank_runs if s >= mid]
+                if right_half_runs:
+                    # Among right-half runs pick the widest — the text/bracket
+                    # gap is always wider than any internal bracket gap.
+                    best_start, _ = max(right_half_runs, key=lambda r: r[1])
+                    actual_right = best_start
+                else:
+                    actual_right = scan_width
             else:
                 actual_right = scan_width
 
