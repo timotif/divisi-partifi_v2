@@ -10,12 +10,13 @@ Figure 2 — label_crop_grid(): one subplot per stave in every labeled system,
            This is the primary tool for diagnosing OCR quality.
 
 Usage:
-    python -m detection.visualize [image_or_pdf] [page_num]
+    python -m detection.visualize [image_or_pdf] [page_num] [--no-plot]
 
 Examples:
     python -m detection.visualize tests/img/score.pdf
     python -m detection.visualize tests/img/score.pdf 2
     python -m detection.visualize tests/img/music.png
+    python -m detection.visualize tests/img/score.pdf 0 --no-plot   # summary only
 """
 
 import sys
@@ -107,6 +108,7 @@ def label_crop_grid(stave_result: dict) -> None:
 
 
 def main():
+    no_plot  = '--no-plot' in sys.argv
     args     = [a for a in sys.argv[1:] if not a.startswith('--')]
     default  = str(pathlib.Path(__file__).resolve().parent.parent
                    / "tests" / "img" / "score.pdf")
@@ -118,6 +120,9 @@ def main():
     from .projection import detect_staves, plot_results, _print_summary
     result = detect_staves(source, page_num=page_num)
     _print_summary(result, source)
+
+    if no_plot:
+        return
 
     # Figure 1: standard stave/barline diagnostic
     plot_results(result)
