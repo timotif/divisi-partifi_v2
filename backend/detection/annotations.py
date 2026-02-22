@@ -13,6 +13,7 @@ Public API:
   detect_instrument_labels(img, systems, img_width, img_height)
 """
 
+import os
 import re
 import logging
 
@@ -20,6 +21,12 @@ import numpy as np
 import cv2 as cv
 
 logger = logging.getLogger(__name__)
+
+# Use best-quality tessdata when available (downloaded separately to ~/.tessdata).
+# Falls back to the system default if the directory doesn't exist.
+_BEST_TESSDATA = os.path.expanduser('~/.tessdata')
+if os.path.isdir(_BEST_TESSDATA):
+    os.environ.setdefault('TESSDATA_PREFIX', _BEST_TESSDATA)
 
 try:
     import pytesseract
@@ -303,8 +310,13 @@ def _find_candidates_in_band(
 def _ocr_text_crop(crop: np.ndarray) -> str:
     """OCR a pre-cropped grayscale image. Returns cleaned text (may be empty).
 
-    Upscales 2× (cubic) before passing to Tesseract. Uses PSM 11 (sparse
-    text) with Italian+English model — best for italic serif score fonts.
+    Upscales 2× (cubic) before passing to Tesseract. Uses:
+    - PSM 6 (uniform block) — handles single- and multi-line labels equally,
+      and correctly distinguishes 'I' from 'II' in italic serif score fonts
+      when used with the best-quality tessdata.
+    - OEM 1 (LSTM only) with Italian+English language model.
+    - Newlines are collapsed to a single space so multi-line labels like
+      "Violoncello\\ne Basso" become "Violoncello e Basso".
     """
     if not _TESSERACT_AVAILABLE or crop.size == 0:
         return ''
@@ -312,12 +324,15 @@ def _ocr_text_crop(crop: np.ndarray) -> str:
     big = cv.resize(crop, None, fx=2, fy=2, interpolation=cv.INTER_CUBIC)
     try:
         raw = pytesseract.image_to_string(
-            big, config='--psm 11 --oem 1 -l ita+eng'
+            big, config='--psm 6 --oem 1 -l ita+eng'
         ).strip()
     except Exception:
         logger.debug("Tesseract failed on crop shape %s", crop.shape)
         return ''
-    return re.sub(r'[^\x20-\x7E\xC0-\xFF]', '', raw).strip()
+    # Strip non-printable chars, then collapse all whitespace (including
+    # newlines from multi-line labels) to a single space.
+    text = re.sub(r'[^\x20-\x7E\xC0-\xFF\n]', '', raw).strip()
+    return re.sub(r'\s+', ' ', text).strip()
 
 
 def _ocr_text(img_gray: np.ndarray, x: int, y: int, w: int, h: int) -> str:
@@ -404,10 +419,10 @@ def detect_annotations(
 
         if is_header_band:
             # Merge ALL validated blocks in the header zone into one rectangle
-            xs = [x         for x, y, w, h in validated]
-            ys = [y         for x, y, w, h in validated]
-            xe = [x + w     for x, y, w, h in validated]
-            ye = [y + h     for x, y, w, h in validated]
+            xs = [x         for x, _y, _w, _h in validated]
+            ys = [y         for _x, y, _w, _h in validated]
+            xe = [x + w     for x, _y, w, _h  in validated]
+            ye = [y + h     for _x, y, _w, h  in validated]
             hx = min(xs);  hy = min(ys)
             hw = max(xe) - hx;  hh = max(ye) - hy
             # Sanity cap: header can't be taller than 40% of the page
@@ -488,9 +503,26 @@ def detect_instrument_labels(
             stave_top    = max(0,          int(stave[0])  - 8)
             stave_bottom = min(img_height, int(stave[-1]) + 8)
 
+            # Trim bracket ink from the right edge of the crop.
+            # The vertical ink profile (sum of ink pixels per column) has a
+            # clear blank gap between the text and the bracket complex.
+            # Find the rightmost all-zero column and use col+1 as the actual
+            # right boundary — this recovers trailing characters (e.g. the
+            # second "I" in "Violino II") that sit close to the bracket.
+            _, binary_strip = cv.threshold(
+                img[stave_top:stave_bottom, 0:scan_width],
+                0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU,
+            )
+            col_ink = binary_strip.sum(axis=0)
+            blank_cols = np.where(col_ink == 0)[0]
+            if blank_cols.size > 0:
+                actual_right = int(blank_cols[-1]) + 1
+            else:
+                actual_right = scan_width
+
             # OCR the whole stave strip at once — one call per stave is more
             # accurate than per-blob calls because Tesseract uses word context.
-            strip_crop = img[stave_top:stave_bottom, 0:scan_width]
+            strip_crop = img[stave_top:stave_bottom, 0:actual_right]
             label = _ocr_text_crop(strip_crop)
             # Strip leading non-alpha chars (misread clefs, brackets)
             label = re.sub(r'^[^A-Za-zÀ-ÿ]+', '', label).strip()

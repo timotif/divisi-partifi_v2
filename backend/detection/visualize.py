@@ -26,12 +26,29 @@ import cv2 as cv
 import numpy as np
 
 
-def label_crop_grid(stave_result: dict) -> None:
-    """Plot every OCR label crop for labeled systems in a grid figure.
+def _easyocr_read(crops: list[np.ndarray]) -> list[str]:
+    """Run EasyOCR on a list of grayscale crops. Returns one string per crop.
 
-    One subplot per stave. Each crop is the exact grayscale image passed to
-    pytesseract, scaled up 3–8× (nearest-neighbour) so fine strokes are
-    legible. The subplot title shows system/stave index and the OCR output.
+    Initialises the reader once (lazy, slow first call) and reuses it.
+    Returns empty string for any crop that yields no result.
+    """
+    import easyocr
+    reader = easyocr.Reader(['en', 'de', 'it'], gpu=False, verbose=False)
+    results = []
+    for crop in crops:
+        big = cv.resize(crop, None, fx=2, fy=2, interpolation=cv.INTER_CUBIC)
+        detections = reader.readtext(big, detail=0, paragraph=True)
+        results.append(' '.join(detections).strip())
+    return results
+
+
+def label_crop_grid(stave_result: dict) -> None:
+    """Plot every label crop with Tesseract vs EasyOCR results side by side.
+
+    Layout: one column per stave (from labeled systems only).
+      Row 0: the crop image (nearest-neighbour upscaled for legibility)
+      Row 1: Tesseract result
+      Row 2: EasyOCR result
 
     Args:
         stave_result: dict returned by detect_staves() — must contain 'img',
@@ -40,7 +57,7 @@ def label_crop_grid(stave_result: dict) -> None:
     import matplotlib
     matplotlib.use('TkAgg')
     import matplotlib.pyplot as plt
-    from .annotations import detect_instrument_labels
+    from .annotations import detect_instrument_labels, _ocr_text_crop
 
     img          = stave_result["img"]
     systems      = stave_result["systems"]
@@ -49,61 +66,84 @@ def label_crop_grid(stave_result: dict) -> None:
 
     gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
 
-    label_grid = detect_instrument_labels(
+    # Tesseract labels via existing pipeline
+    tess_grid = detect_instrument_labels(
         gray, systems, img_width, img_height, barline_info
     )
 
-    # Collect one entry per stave from labeled systems only
-    entries: list[tuple[np.ndarray, int, int, str]] = []
+    # Collect crops from labeled systems only
+    crops:   list[np.ndarray]       = []
+    entries: list[tuple[int, int]]  = []   # (sys_idx, stave_idx)
     for si, system in enumerate(systems):
         info = barline_info[si] if si < len(barline_info) else {}
-        bx   = info.get('x')
-        if bx is None:
-            continue   # unlabeled system — no label column
-        # bracket_x excludes the bracket from the crop, matching OCR input
-        scan_right = info.get('bracket_x') or bx
+        if info.get('x') is None:
+            continue
+        scan_right = info.get('bracket_x') or info['x']
         for ti, stave in enumerate(system):
-            st   = max(0,           int(stave[0])  - 8)
-            sb   = min(img_height,  int(stave[-1]) + 8)
-            crop = gray[st:sb, 0:scan_right]
-            name = (label_grid[si][ti]['name']
-                    if si < len(label_grid) and ti < len(label_grid[si])
-                    else '')
-            entries.append((crop, si, ti, name))
+            st = max(0,          int(stave[0])  - 8)
+            sb = min(img_height, int(stave[-1]) + 8)
+            crops.append(gray[st:sb, 0:scan_right])
+            entries.append((si, ti))
 
     if not entries:
         print("No labeled systems found — nothing to plot.")
         return
 
-    cols = min(len(entries), 6)
-    rows = (len(entries) + cols - 1) // cols
+    print(f"Running EasyOCR on {len(crops)} crops (first run downloads model)…")
+    easy_texts = _easyocr_read(crops)
+    print("EasyOCR done.")
+
+    n    = len(entries)
+    cols = min(n, 6)
+    rows = (n + cols - 1) // cols
+    # 3 subplot rows per grid row: image + tesseract label + easyocr label
     fig, axes = plt.subplots(
-        rows, cols,
-        figsize=(cols * 2.4, rows * 2.8),
+        rows * 3, cols,
+        figsize=(cols * 2.6, rows * 4.0),
         squeeze=False,
     )
 
-    for idx, (crop, si, ti, name) in enumerate(entries):
-        r, c = divmod(idx, cols)
-        ax   = axes[r][c]
-        # Scale up so thin strokes are legible; nearest-neighbour preserves edges
-        scale = max(1, 100 // max(crop.shape[0], 1))
-        big   = cv.resize(crop, None, fx=scale, fy=scale,
-                          interpolation=cv.INTER_NEAREST)
-        ax.imshow(big, cmap='gray', vmin=0, vmax=255)
-        ocr_display = f'"{name}"' if name else '(empty)'
-        ax.set_title(f"sys{si} stave{ti}\n{ocr_display}", fontsize=7, pad=3)
-        ax.axis('off')
+    for idx, ((si, ti), crop, easy) in enumerate(zip(entries, crops, easy_texts)):
+        gc, r = idx % cols, idx // cols
+        tess  = (tess_grid[si][ti]['name']
+                 if si < len(tess_grid) and ti < len(tess_grid[si]) else '')
 
-    # Hide unused subplot cells
-    for idx in range(len(entries), rows * cols):
-        r, c = divmod(idx, cols)
-        axes[r][c].axis('off')
+        # Row 0: crop image
+        ax_img  = axes[r * 3][gc]
+        scale   = max(1, 100 // max(crop.shape[0], 1))
+        big     = cv.resize(crop, None, fx=scale, fy=scale,
+                            interpolation=cv.INTER_NEAREST)
+        ax_img.imshow(big, cmap='gray', vmin=0, vmax=255)
+        ax_img.set_title(f"sys{si} stave{ti}", fontsize=7, pad=2)
+        ax_img.axis('off')
+
+        # Row 1: Tesseract
+        ax_t = axes[r * 3 + 1][gc]
+        ax_t.axis('off')
+        ax_t.text(0.5, 0.7, 'Tesseract:', ha='center', va='center',
+                  fontsize=6, color='gray', transform=ax_t.transAxes)
+        ax_t.text(0.5, 0.3, f'"{tess}"' if tess else '(empty)',
+                  ha='center', va='center', fontsize=8,
+                  color='steelblue', transform=ax_t.transAxes, wrap=True)
+
+        # Row 2: EasyOCR
+        ax_e = axes[r * 3 + 2][gc]
+        ax_e.axis('off')
+        ax_e.text(0.5, 0.7, 'EasyOCR:', ha='center', va='center',
+                  fontsize=6, color='gray', transform=ax_e.transAxes)
+        ax_e.text(0.5, 0.3, f'"{easy}"' if easy else '(empty)',
+                  ha='center', va='center', fontsize=8,
+                  color='darkorange', transform=ax_e.transAxes, wrap=True)
+
+    # Hide unused cells
+    for idx in range(n, rows * cols):
+        gc, r = idx % cols, idx // cols
+        for row_offset in range(3):
+            axes[r * 3 + row_offset][gc].axis('off')
 
     fig.suptitle(
-        f"Label crops — exact OCR input  "
-        f"(×{scale} nearest-neighbour upscale)  |  "
-        f"{len(entries)} crops from {sum(1 for i in barline_info if i.get('x'))} labeled system(s)",
+        f"Label crops — Tesseract (blue) vs EasyOCR (orange)  |  "
+        f"{n} staves from {sum(1 for i in barline_info if i.get('x'))} labeled system(s)",
         fontsize=9,
     )
     fig.tight_layout()
