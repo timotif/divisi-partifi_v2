@@ -13,7 +13,7 @@ from analyzer import (
 	Score, Staff, Part, TMP_DIR,
 	sanitize_string, PageError, StaffError, PartError
 )
-from detection.projection import detect_staves
+from detection import detect_staves, detect_annotations, detect_instrument_labels
 
 logger = logging.getLogger(__name__)
 
@@ -358,6 +358,44 @@ def staves_to_dividers(
 	return dividers, system_flags, snap_flags
 
 
+def _resolve_label_names(label_grid: list[list[dict]]) -> tuple[list[str], list[str]]:
+	"""Derive (strip_names, strip_short_names) from an instrument label grid.
+
+	Uses the first system's labels as the naming authority (most likely to
+	contain full names). For each stave position, looks for an abbreviated
+	version in subsequent systems to use as the short name.
+
+	Args:
+		label_grid: Output of detect_instrument_labels() — nested list
+		            of {'name', 'short_name', 'is_abbreviated'} dicts.
+
+	Returns:
+		(strip_names, strip_short_names) — parallel flat lists, one entry per
+		stave in the first system. Both are empty strings for undetected labels.
+	"""
+	if not label_grid:
+		return [], []
+
+	first_sys = label_grid[0]
+	strip_names: list[str] = []
+	strip_short_names: list[str] = []
+
+	for si, entry in enumerate(first_sys):
+		full  = entry['name']
+		short = full  # default: same as full name
+
+		# Look for an abbreviated version at the same stave index in later systems
+		for later_sys in label_grid[1:]:
+			if si < len(later_sys) and later_sys[si]['is_abbreviated']:
+				short = later_sys[si]['name']
+				break
+
+		strip_names.append(full)
+		strip_short_names.append(short)
+
+	return strip_names, strip_short_names
+
+
 @app.route('/api/scores/<score_id>/pages/<int:page_num>/detect', methods=['POST'])
 def detect_page_staves(score_id: str, page_num: int):
 	"""Run staff detection on a page and return tentative divider positions.
@@ -379,17 +417,21 @@ def detect_page_staves(score_id: str, page_num: int):
 	if page_num in cache:
 		cached = cache[page_num]
 		return jsonify({
-			"confidence": cached["confidence"],
-			"reasons": cached["reasons"],
-			"stave_count": cached["stave_count"],
-			"system_count": cached["system_count"],
-			"dividers": cached["dividers"],
-			"system_flags": cached["system_flags"],
-			"snap_flags": cached.get("snap_flags", []),
+			"confidence":        cached["confidence"],
+			"reasons":           cached["reasons"],
+			"stave_count":       cached["stave_count"],
+			"system_count":      cached["system_count"],
+			"dividers":          cached["dividers"],
+			"system_flags":      cached["system_flags"],
+			"snap_flags":        cached.get("snap_flags", []),
+			"strip_names":       cached.get("strip_names", []),
+			"strip_short_names": cached.get("strip_short_names", []),
+			"header":            list(cached["header"]) if cached.get("header") else None,
+			"markings":          [list(m) for m in cached.get("markings", [])],
 		})
 
 	page_img = score.pages[page_num].img
-	img_height = page_img.shape[0]
+	img_height, img_width = page_img.shape[:2]
 
 	try:
 		result = detect_staves(page_img)
@@ -407,24 +449,54 @@ def detect_page_staves(score_id: str, page_num: int):
 		systems, img_height, projection
 	)
 
+	# --- Annotation detection (header + markings) ---
+	ann = {"header": None, "markings": []}
+	try:
+		ann = detect_annotations(
+			page_img,
+			systems,
+			img_width,
+			img_height,
+			is_first_page=(page_num == 0),
+		)
+	except Exception:
+		logger.exception("Annotation detection failed for page %d — continuing without annotations", page_num)
+
+	# --- Instrument label detection ---
+	label_grid: list[list[dict]] = []
+	try:
+		label_grid = detect_instrument_labels(page_img, systems, img_width, img_height)
+	except Exception:
+		logger.exception("Instrument label detection failed for page %d — continuing without labels", page_num)
+
+	detected_strip_names, detected_strip_short_names = _resolve_label_names(label_grid)
+
 	cache[page_num] = {
-		"confidence": confidence,
-		"reasons": reasons,
-		"stave_count": len(staves),
-		"system_count": len(systems),
-		"dividers": dividers,
-		"system_flags": sys_flags,
-		"snap_flags": snap_flags,
+		"confidence":        confidence,
+		"reasons":           reasons,
+		"stave_count":       len(staves),
+		"system_count":      len(systems),
+		"dividers":          dividers,
+		"system_flags":      sys_flags,
+		"snap_flags":        snap_flags,
+		"strip_names":       detected_strip_names,
+		"strip_short_names": detected_strip_short_names,
+		"header":            ann["header"],
+		"markings":          ann["markings"],
 	}
 
 	return jsonify({
-		"confidence": confidence,
-		"reasons": reasons,
-		"stave_count": len(staves),
-		"system_count": len(systems),
-		"dividers": dividers,
-		"system_flags": sys_flags,
-		"snap_flags": snap_flags,
+		"confidence":        confidence,
+		"reasons":           reasons,
+		"stave_count":       len(staves),
+		"system_count":      len(systems),
+		"dividers":          dividers,
+		"system_flags":      sys_flags,
+		"snap_flags":        snap_flags,
+		"strip_names":       detected_strip_names,
+		"strip_short_names": detected_strip_short_names,
+		"header":            list(ann["header"]) if ann["header"] else None,
+		"markings":          [list(m) for m in ann["markings"]],
 	})
 
 

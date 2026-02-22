@@ -530,6 +530,38 @@ const MusicPartitioner = () => {
         return { ...prev, [pageNum]: data.strip_names };
       });
 
+      // Apply detected header (page 0 only) — idempotent: skip if user already set one
+      if (pageNum === 0 && data.header) {
+        const [ax, ay, aw, ah] = data.header;
+        setHeaderRegion(prev => {
+          if (prev !== null) return prev;
+          return {
+            page: pageNum,
+            x: Math.round(ax * scale),
+            y: Math.round(ay * scale),
+            w: Math.round(aw * scale),
+            h: Math.round(ah * scale),
+          };
+        });
+      }
+
+      // Apply detected markings — idempotent: skip if this page already has markings
+      if (data.markings && data.markings.length > 0) {
+        setMarkings(prev => {
+          if (prev.some(m => m.page === pageNum)) return prev;
+          return [
+            ...prev,
+            ...data.markings.map(([ax, ay, aw, ah]) => ({
+              page: pageNum,
+              x: Math.round(ax * scale),
+              y: Math.round(ay * scale),
+              w: Math.round(aw * scale),
+              h: Math.round(ah * scale),
+            })),
+          ];
+        });
+      }
+
       // Mark as detected but NOT confirmed — user must review
       setDetectedPages(prev => new Set(prev).add(pageNum));
     } catch (err) {

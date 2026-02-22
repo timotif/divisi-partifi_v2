@@ -4,3 +4,4 @@ PyMuPDF==1.25.5
 scipy==1.17.0
 flask==3.1.1
 flask-cors==6.0.0
+pytesseract==0.3.13

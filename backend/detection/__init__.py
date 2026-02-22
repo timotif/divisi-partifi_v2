@@ -2,3 +2,4 @@
 
 from .projection import detect_staves
 from .hough import detect_lines
+from .annotations import detect_annotations, detect_instrument_labels
