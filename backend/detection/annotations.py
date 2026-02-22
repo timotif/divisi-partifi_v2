@@ -48,9 +48,8 @@ _OCR_MIN_ALPHA_CHARS = 2   # candidate must yield at least this many alphabetic 
 _PADDING_PX = 6
 
 # Instrument label scan
-_LABEL_SCAN_FRACTION  = 0.12   # leftmost fraction of page to scan for labels
-_LABEL_MIN_ALPHA      = 2      # min alpha chars for a valid label
-_LABEL_MAX_ALPHA      = 40     # max alpha chars (cap at reasonable instrument name)
+_LABEL_MIN_ALPHA = 2    # min alpha chars for a valid label
+_LABEL_MAX_ALPHA = 40   # max alpha chars (cap at reasonable instrument name)
 
 # Tempo words for classification
 _TEMPO_WORDS = frozenset({
@@ -425,43 +424,62 @@ def detect_instrument_labels(
     systems: list,
     img_width: int,
     img_height: int,
+    barline_info: list[dict] | None = None,
 ) -> list[list[dict]]:
-    """Detect instrument name labels in the left margin beside each stave.
+    """Detect instrument name labels in the left margin of labeled systems.
 
-    Scans the leftmost ~12% of the page beside each stave's 5-line span.
-    The scan strip ends before the initial barline to avoid barline fragments.
+    A system is "labeled" when it has a detected initial barline (i.e.
+    ``barline_info[i]['x']`` is not None). Labels appear in the horizontal
+    strip ``[0, barline_x)`` beside each stave's 5-line span. Systems
+    without a barline x are skipped (they have no label column).
 
-    A valid label must contain at least _LABEL_MIN_ALPHA alphabetic characters
-    to reject clef symbols, accidentals, and time-signature digits that OCR
-    sometimes misreads as characters.
+    Using the exact barline_x from the detection pipeline (rather than a
+    fixed fraction) avoids scanning into clef/accidental territory for
+    non-labeled systems and gives a precise right boundary for the scan.
 
     Args:
-        img:       Grayscale page image.
-        systems:   Detected systems from detect_staves().
-        img_width: Image width in backend pixels.
-        img_height:Image height in backend pixels.
+        img:          Grayscale page image.
+        systems:      Detected systems from detect_staves().
+        img_width:    Image width in backend pixels.
+        img_height:   Image height in backend pixels.
+        barline_info: Per-system barline metadata from detect_staves()
+                      (list of {'x': int|None, 'span': ...}).  If None or
+                      shorter than systems, falls back to _LABEL_SCAN_FRACTION.
 
     Returns:
         List of systems, each a list of dicts per stave:
             {'name': str, 'short_name': str, 'is_abbreviated': bool}
-        Empty string if no valid label found.
+        Systems without a barline x return empty-string entries for each stave.
     """
     if not _TESSERACT_AVAILABLE:
         return []
 
     _, binary = cv.threshold(img, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU)
-    scan_width = max(50, int(img_width * _LABEL_SCAN_FRACTION))
 
     all_systems: list[list[dict]] = []
-    for system in systems:
+    for sys_idx, system in enumerate(systems):
+        # Determine scan width for this system from barline_x
+        barline_x: int | None = None
+        if barline_info and sys_idx < len(barline_info):
+            barline_x = barline_info[sys_idx].get('x')
+
+        if barline_x is None:
+            # No barline detected → not a labeled system; return empty entries
+            all_systems.append([
+                {'name': '', 'short_name': '', 'is_abbreviated': False}
+                for _ in system
+            ])
+            continue
+
+        # scan_width = barline_x so we stay strictly left of the barline
+        scan_width = max(10, barline_x)
+
         system_labels: list[dict] = []
         for stave in system:
-            # Scan row range: from slightly above top staff line to slightly
-            # below bottom staff line (the 5-line span only).
+            # Row range: slightly above/below the 5 staff lines
             stave_top    = max(0,          int(stave[0])  - 8)
             stave_bottom = min(img_height, int(stave[-1]) + 8)
 
-            # Crop to left-margin strip for this stave
             binary_crop = binary[stave_top:stave_bottom, 0:scan_width]
             n, _, stats, _ = cv.connectedComponentsWithStats(binary_crop, connectivity=8)
 
@@ -474,7 +492,7 @@ def detect_instrument_labels(
                 area = int(stats[i, cv.CC_STAT_AREA])
                 if area < _CC_MIN_AREA:
                     continue
-                # Discard blobs that span the full scan width (likely staff/barline)
+                # Discard blobs spanning almost the full scan width (barline itself)
                 if w >= scan_width * 0.85:
                     continue
                 blobs.append((x, y, w, h))
@@ -483,7 +501,7 @@ def detect_instrument_labels(
                 system_labels.append({'name': '', 'short_name': '', 'is_abbreviated': False})
                 continue
 
-            # Collect and OCR each blob; keep only those with enough alpha chars
+            # OCR each blob left-to-right; keep those with enough alpha chars
             label_parts: list[str] = []
             for x, y, w, h in sorted(blobs, key=lambda b: b[0]):
                 text = _ocr_text(img, x, y, w, h)
@@ -492,7 +510,7 @@ def detect_instrument_labels(
                     label_parts.append(text.strip())
 
             label = ' '.join(label_parts).strip()
-            # Remove stray leading punctuation / digits from misread clefs
+            # Strip leading non-alpha chars (misread clefs, brackets)
             label = re.sub(r'^[^A-Za-zÀ-ÿ]+', '', label).strip()
 
             is_abbrev = label.endswith('.') or (0 < len(label) <= 5)

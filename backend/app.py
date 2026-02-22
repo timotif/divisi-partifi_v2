@@ -439,11 +439,12 @@ def detect_page_staves(score_id: str, page_num: int):
 		logger.exception("Staff detection failed for page %d", page_num)
 		abort(500, description="Staff detection failed")
 
-	systems = result["systems"]
-	staves = result["staves"]
-	confidence = result["confidence"]
-	reasons = result["reasons"]
-	projection = result["projection"]
+	systems      = result["systems"]
+	staves       = result["staves"]
+	barline_info = result["barline_info"]
+	confidence   = result["confidence"]
+	reasons      = result["reasons"]
+	projection   = result["projection"]
 
 	dividers, sys_flags, snap_flags = staves_to_dividers(
 		systems, img_height, projection
@@ -465,7 +466,7 @@ def detect_page_staves(score_id: str, page_num: int):
 	# --- Instrument label detection ---
 	label_grid: list[list[dict]] = []
 	try:
-		label_grid = detect_instrument_labels(page_img, systems, img_width, img_height)
+		label_grid = detect_instrument_labels(page_img, systems, img_width, img_height, barline_info)
 	except Exception:
 		logger.exception("Instrument label detection failed for page %d — continuing without labels", page_num)
 
