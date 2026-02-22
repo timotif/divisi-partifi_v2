@@ -14,6 +14,7 @@ from analyzer import (
 	sanitize_string, PageError, StaffError, PartError
 )
 from detection import detect_staves, detect_annotations, detect_instrument_labels
+from detection.ai_annotations import detect_with_ai
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +401,11 @@ def _resolve_label_names(label_grid: list[list[dict]]) -> tuple[list[str], list[
 def detect_page_staves(score_id: str, page_num: int):
 	"""Run staff detection on a page and return tentative divider positions.
 
-	No request body required.
+	Optional request body (JSON):
+	  use_ai_detection: bool  — if true and ANTHROPIC_API_KEY is set, uses a
+	                            Claude vision model to detect instrument labels,
+	                            header, and markings instead of Tesseract.
+	                            Falls back to Tesseract silently on failure.
 
 	Returns dividers and system flags in backend-pixel space (300 DPI).
 	The frontend is responsible for scaling to display pixels using the
@@ -471,6 +476,39 @@ def detect_page_staves(score_id: str, page_num: int):
 		logger.exception("Instrument label detection failed for page %d — continuing without labels", page_num)
 
 	detected_strip_names, detected_strip_short_names = _resolve_label_names(label_grid)
+
+	# --- AI annotation detection (optional premium tier) ---
+	# Activated when ANTHROPIC_API_KEY is set in the environment AND the
+	# client passes `"use_ai_detection": true` in the POST body.
+	#
+	# When active, the AI result completely replaces the Tesseract results for
+	# instrument labels, header, and markings — it is not merged, because the
+	# AI is expected to be strictly more accurate.  The Tesseract pipeline still
+	# runs first so the stave/divider detection result (which does not use OCR)
+	# is always available regardless of AI availability.
+	#
+	# If the AI call fails for any reason (network, quota, bad JSON) we log a
+	# warning and silently fall back to the Tesseract results already computed
+	# above — the user sees no error, just slightly less accurate labels.
+	request_data = request.get_json(silent=True) or {}
+	if os.getenv('ANTHROPIC_API_KEY') and request_data.get('use_ai_detection'):
+		try:
+			ai = detect_with_ai(page_img, is_first_page=(page_num == 0))
+			ann                        = ai['annotations']
+			detected_strip_names       = ai['strip_names']
+			detected_strip_short_names = ai['strip_short_names']
+			logger.info(
+				"AI detection succeeded for page %d: %d labels, header=%s, %d markings",
+				page_num,
+				len(detected_strip_names),
+				ann['header'] is not None,
+				len(ann['markings']),
+			)
+		except Exception:
+			logger.warning(
+				"AI detection failed for page %d — using Tesseract results",
+				page_num, exc_info=True,
+			)
 
 	cache[page_num] = {
 		"confidence":        confidence,
