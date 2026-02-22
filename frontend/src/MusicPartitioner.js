@@ -41,6 +41,10 @@ const MusicPartitioner = () => {
   // --- System dividers: per-page, parallel boolean array ---
   const [systemDividersByPage, setSystemDividersByPage] = useState({});
 
+  // --- Snap flags: per-page, parallel boolean array (true = snapped to clear row) ---
+  // Only populated for auto-detected dividers; cleared when dividers are manually edited.
+  const [snapFlagsByPage, setSnapFlagsByPage] = useState({});
+
   // --- Per-page strip names ---
   const [stripNamesByPage, setStripNamesByPage] = useState({});
 
@@ -72,6 +76,26 @@ const MusicPartitioner = () => {
   const [error, setError] = useState(null);
 
   const containerRef = useRef(null);
+
+  // --- Per-page undo stack ---
+  // Each entry: { page, dividers, systemFlags, snapFlags, stripNames }
+  // Capped at 20 entries to avoid unbounded memory use.
+  const undoStackRef = useRef([]);
+  const UNDO_LIMIT = 20;
+
+  const pushUndo = useCallback((page) => {
+    const entry = {
+      page,
+      dividers: [...(dividersByPage[page] || [])],
+      systemFlags: [...(systemDividersByPage[page] || [])],
+      snapFlags: [...(snapFlagsByPage[page] || [])],
+      stripNames: [...(stripNamesByPage[page] || [])],
+    };
+    undoStackRef.current = [
+      ...undoStackRef.current.slice(-(UNDO_LIMIT - 1)),
+      entry,
+    ];
+  }, [dividersByPage, systemDividersByPage, snapFlagsByPage, stripNamesByPage]);
 
   // --- Responsive size measurement ---
   const scoreAreaRef = useRef(null);
@@ -148,10 +172,11 @@ const MusicPartitioner = () => {
     })));
   }, [pageWidth]);
 
-  // --- Current page dividers, strip names, and system divider flags ---
+  // --- Current page dividers, strip names, system divider flags, and snap flags ---
   const currentDividers = dividersByPage[currentPage] || [];
   const currentStripNames = stripNamesByPage[currentPage] || [];
   const currentSystemDividers = systemDividersByPage[currentPage] || [];
+  const currentSnapFlags = snapFlagsByPage[currentPage] || [];
 
   // --- Strips computation ---
   const getStrips = useCallback(() => {
@@ -346,6 +371,8 @@ const MusicPartitioner = () => {
       setDividersByPage(initialDividers);
       setStripNamesByPage(initialStripNames);
       setSystemDividersByPage(initialSystemDividers);
+      setSnapFlagsByPage({});
+      undoStackRef.current = [];
       setConfirmedPages(new Set());
       setDetectedPages(new Set());
       setDetectingPage(null);
@@ -454,10 +481,18 @@ const MusicPartitioner = () => {
         return;
       }
 
+      const snapFlags = data.snap_flags || [];
+      const snapFailCount = snapFlags.filter(f => f === false).length;
+
       if (data.confidence < 0.7) {
         setDetectionWarnings(prev => ({
           ...prev,
           [pageNum]: `Low-confidence detection (${Math.round(data.confidence * 100)}%) \u2014 please review.`,
+        }));
+      } else if (snapFailCount > 0) {
+        setDetectionWarnings(prev => ({
+          ...prev,
+          [pageNum]: `${snapFailCount} divider${snapFailCount > 1 ? 's' : ''} couldn\u2019t snap to a clear gap \u2014 check for clipping.`,
         }));
       }
 
@@ -479,6 +514,10 @@ const MusicPartitioner = () => {
       setSystemDividersByPage(prev => {
         if (prev[pageNum]?.length > 0) return prev;
         return { ...prev, [pageNum]: data.system_flags };
+      });
+      setSnapFlagsByPage(prev => {
+        if (prev[pageNum]?.length > 0) return prev;
+        return { ...prev, [pageNum]: snapFlags };
       });
       // Auto-fill strip names from the global known sequence
       setStripNamesByPage(prev => {
@@ -514,6 +553,7 @@ const MusicPartitioner = () => {
 
   // --- Divider management ---
   const addDividerAtY = (y, isSystem = false) => {
+    pushUndo(currentPage);
     // Both setters independently compute insertIdx from y against their
     // own prev state. This avoids stale-closure issues without nesting
     // setters (which causes double-execution in StrictMode).
@@ -523,25 +563,22 @@ const MusicPartitioner = () => {
       while (insertIdx < divs.length && divs[insertIdx] < y) insertIdx++;
       const newDividers = [...divs];
       newDividers.splice(insertIdx, 0, y);
-
-      // Nested to avoid stale-closure read of dividersByPage for insertIdx
-      setSystemDividersByPage(flagsPrev => {
-        const flags = [...(flagsPrev[currentPage] || [])];
-        flags.splice(insertIdx, 0, isSystem);
-        return { ...flagsPrev, [currentPage]: flags };
-      });
-
       return { ...prev, [currentPage]: newDividers };
     });
     setSystemDividersByPage(prev => {
-      // Compute insertIdx from the dividers for this page (read from
-      // dividersByPage which is the current render's snapshot — matches
-      // the array that setDividersByPage's updater will also see).
       const divs = dividersByPage[currentPage] || [];
       let insertIdx = 0;
       while (insertIdx < divs.length && divs[insertIdx] < y) insertIdx++;
       const flags = [...(prev[currentPage] || [])];
       flags.splice(insertIdx, 0, isSystem);
+      return { ...prev, [currentPage]: flags };
+    });
+    setSnapFlagsByPage(prev => {
+      const divs = dividersByPage[currentPage] || [];
+      let insertIdx = 0;
+      while (insertIdx < divs.length && divs[insertIdx] < y) insertIdx++;
+      const flags = [...(prev[currentPage] || [])];
+      flags.splice(insertIdx, 0, null);  // null = manual, no snap attempted
       return { ...prev, [currentPage]: flags };
     });
     // Insert an empty name for the new strip and auto-fill using the
@@ -666,7 +703,7 @@ const MusicPartitioner = () => {
     }
   }, [rectDragStart, handleRectMouseMove, handleRectMouseUp]);
 
-  // --- Keyboard shortcuts for header (H) and marking (M) selection ---
+  // --- Keyboard shortcuts (edit phase) ---
   useEffect(() => {
     if (phase !== 'edit') return;
     const handleKeyDown = (e) => {
@@ -678,6 +715,16 @@ const MusicPartitioner = () => {
       } else if (e.key === 'm' || e.key === 'M') {
         setIsSelectingMarking(prev => !prev);
         setIsSelectingHeader(false);
+      } else if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        const stack = undoStackRef.current;
+        if (stack.length === 0) return;
+        const prev = stack[stack.length - 1];
+        undoStackRef.current = stack.slice(0, -1);
+        setDividersByPage(d => ({ ...d, [prev.page]: prev.dividers }));
+        setSystemDividersByPage(f => ({ ...f, [prev.page]: prev.systemFlags }));
+        setSnapFlagsByPage(s => ({ ...s, [prev.page]: prev.snapFlags }));
+        setStripNamesByPage(n => ({ ...n, [prev.page]: prev.stripNames }));
       }
     };
     document.addEventListener('keydown', handleKeyDown);
@@ -692,8 +739,14 @@ const MusicPartitioner = () => {
   } : null;
 
   const removeDivider = (index) => {
+    pushUndo(currentPage);
     updateCurrentPageDividers(prev => prev.filter((_, i) => i !== index));
     setSystemDividersByPage(prev => {
+      const flags = [...(prev[currentPage] || [])];
+      flags.splice(index, 1);
+      return { ...prev, [currentPage]: flags };
+    });
+    setSnapFlagsByPage(prev => {
       const flags = [...(prev[currentPage] || [])];
       flags.splice(index, 1);
       return { ...prev, [currentPage]: flags };
@@ -736,6 +789,7 @@ const MusicPartitioner = () => {
   // --- Drag handling ---
   const handleMouseDown = (e, index) => {
     e.preventDefault();
+    pushUndo(currentPage);
     const rect = containerRef.current.getBoundingClientRect();
     const mouseY = e.clientY - rect.top;
     setDragIndex(index);
@@ -763,9 +817,12 @@ const MusicPartitioner = () => {
   }, [dragIndex, dragOffset, dividersByPage, currentPage, pageHeight, updateCurrentPageDividers]);
 
   const handleMouseUp = useCallback(() => {
+    if (dragIndex !== -1) {
+      suppressNextClick.current = true;
+    }
     setDragIndex(-1);
     setDragOffset(0);
-  }, []);
+  }, [dragIndex]);
 
   useEffect(() => {
     if (dragIndex !== -1) {
@@ -997,6 +1054,7 @@ const MusicPartitioner = () => {
               currentPage={currentPage}
               dividers={currentDividers}
               systemDividers={currentSystemDividers}
+              snapFlags={currentSnapFlags}
               strips={strips}
               stripNames={currentStripNames}
               onRemoveDivider={removeDivider}

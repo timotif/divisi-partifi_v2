@@ -163,23 +163,77 @@ def serve_page(score_id: str, page_num: int):
 
 # --- Staff detection helpers ---
 
-def find_divider_y(stave_above: np.ndarray, stave_below: np.ndarray) -> int:
-	"""Find the Y position for a divider between two adjacent staves.
+# Ink threshold: a row counts as "clear" when it has at most this many ink
+# pixels.  At 300 DPI ~5 pixels is a couple of stray noise dots — well below
+# any real printed element (staff lines, noteheads, slurs all produce dozens
+# to hundreds of ink pixels per row).
+_SNAP_INK_THRESHOLD = 5
 
-	Currently uses the midpoint between the bottom staff line of stave_above
-	and the top staff line of stave_below. This function is the hook for
-	future refinement (collision detection, optimal gap placement, etc.).
+
+def _snap_to_clear_row(
+	row_start: int,
+	row_end: int,
+	ideal_y: int,
+	projection: np.ndarray,
+) -> tuple[int, bool]:
+	"""Snap ``ideal_y`` to the nearest clear row within (row_start, row_end).
+
+	Scans outward from ``ideal_y`` — alternating one step above, one step below
+	— and returns the first row whose ink count is at or below
+	``_SNAP_INK_THRESHOLD``.  This guarantees the result is as close to the
+	midpoint as possible and never crosses into printed content.
+
+	If no clear row exists in the gap, returns ``(ideal_y, False)``.
 
 	Args:
-		stave_above: array of 5 Y values for the upper stave's staff lines.
-		stave_below: array of 5 Y values for the lower stave's staff lines.
+		row_start: exclusive lower bound (last row of stave above).
+		row_end:   exclusive upper bound (first row of stave below).
+		ideal_y:   preferred starting position for the outward scan.
+		projection: 1-D ink-count array from horizontal_projection().
 
 	Returns:
-		Y position in backend pixels.
+		(y, snapped) — final Y and whether a clear row was found.
+	"""
+	half = (row_end - row_start) // 2
+	for offset in range(half + 1):
+		for row in ([ideal_y - offset, ideal_y + offset] if offset > 0 else [ideal_y]):
+			if row <= row_start or row >= row_end:
+				continue
+			if int(projection[row]) <= _SNAP_INK_THRESHOLD:
+				return row, True
+	return ideal_y, False
+
+
+def find_divider_y(
+	stave_above: np.ndarray,
+	stave_below: np.ndarray,
+	projection: np.ndarray | None = None,
+) -> tuple[int, bool]:
+	"""Find the Y position for a divider between two adjacent staves.
+
+	Starts at the midpoint between the bottom staff line of stave_above and
+	the top staff line of stave_below, then delegates to _snap_to_clear_row
+	to land on the nearest ink-free row in the gap.
+
+	Args:
+		stave_above: array of Y values for the upper stave's staff lines.
+		stave_below: array of Y values for the lower stave's staff lines.
+		projection:  1-D ink-count array from horizontal_projection().
+		             When None the function falls back to the plain midpoint.
+
+	Returns:
+		(y, snapped) — Y position in backend pixels, and a bool indicating
+		whether the position was successfully snapped to a clear row
+		(False means the gap had no fully-blank row and the midpoint was kept).
 	"""
 	bottom = int(stave_above[-1])
 	top = int(stave_below[0])
-	return (bottom + top) // 2
+	mid = (bottom + top) // 2
+
+	if projection is None or top <= bottom:
+		return mid, False
+
+	return _snap_to_clear_row(bottom, top, mid, projection)
 
 
 def _compute_typical_margin(systems: list[list[np.ndarray]]) -> int:
@@ -201,8 +255,10 @@ def _compute_typical_margin(systems: list[list[np.ndarray]]) -> int:
 
 
 def staves_to_dividers(
-	systems: list[list[np.ndarray]], img_height: int
-) -> tuple[list[int], list[bool]]:
+	systems: list[list[np.ndarray]],
+	img_height: int,
+	projection: np.ndarray | None = None,
+) -> tuple[list[int], list[bool], list[bool]]:
 	"""Convert detected stave groups into divider positions and system flags.
 
 	System dividers mark only the **top** of each system. The dead zone
@@ -214,16 +270,26 @@ def staves_to_dividers(
 	gaps) are placed at the same distance from the staff as a typical
 	mid-divider, so all staves get consistent margins.
 
+	All divider types (system, between-stave, bottom boundary) attempt to
+	snap to the nearest ink-free row in their respective gap via
+	_snap_to_clear_row.
+
 	Args:
 		systems: list of systems, each a list of staves (each stave is an
 			array of 5 Y pixel positions).
 		img_height: page image height in pixels.
+		projection: 1-D ink-count array (optional).  When supplied, enables
+			white-row snapping for all dividers.
 
 	Returns:
-		(dividers, system_flags) — same-length lists, sorted by Y.
+		(dividers, system_flags, snap_flags) — three parallel same-length
+		lists sorted by Y.  snap_flags[i] is True when divider i was
+		successfully snapped to a clear row, False when it fell back to the
+		computed default position.
 	"""
 	dividers: list[int] = []
 	system_flags: list[bool] = []
+	snap_flags: list[bool] = []
 
 	margin = _compute_typical_margin(systems)
 
@@ -236,34 +302,60 @@ def staves_to_dividers(
 
 		# --- Top boundary (system divider) ---
 		if sys_idx == 0:
-			# Same distance above the first staff as a mid-divider
-			top_y = max(0, first_top - margin)
+			# Gap: [0, first_top); ideal position = first_top - margin
+			ideal_top = max(0, first_top - margin)
+			if projection is not None and first_top > 0:
+				top_y, snapped_top = _snap_to_clear_row(0, first_top, ideal_top, projection)
+			else:
+				top_y, snapped_top = ideal_top, False
 		else:
-			# Inter-system gap: place 2/3 into the gap (closer to next system)
+			# Inter-system gap: [prev_bottom, first_top); ideal = 2/3 into gap
 			prev_bottom = int(systems[sys_idx - 1][-1][-1])
 			gap = first_top - prev_bottom
-			top_y = prev_bottom + gap * 2 // 3
+			ideal_top = prev_bottom + gap * 2 // 3
+			if projection is not None and first_top > prev_bottom:
+				top_y, snapped_top = _snap_to_clear_row(
+					prev_bottom, first_top, ideal_top, projection
+				)
+			else:
+				top_y, snapped_top = ideal_top, False
 		dividers.append(top_y)
 		system_flags.append(True)
+		snap_flags.append(snapped_top)
 
 		# --- Between-stave dividers (part dividers) ---
 		for i in range(len(system) - 1):
-			dividers.append(find_divider_y(system[i], system[i + 1]))
+			y, snapped = find_divider_y(system[i], system[i + 1], projection)
+			dividers.append(y)
 			system_flags.append(False)
+			snap_flags.append(snapped)
 
 		# --- Bottom boundary (part divider) ---
 		if sys_idx < len(systems) - 1:
-			# Inter-system gap: place 1/3 into the gap (closer to current system)
+			# Inter-system gap: [last_bottom, next_top); ideal = 1/3 into gap
 			next_top = int(systems[sys_idx + 1][0][0])
 			gap = next_top - last_bottom
-			bottom_y = last_bottom + gap // 3
+			ideal_bottom = last_bottom + gap // 3
+			if projection is not None and next_top > last_bottom:
+				bottom_y, snapped_bottom = _snap_to_clear_row(
+					last_bottom, next_top, ideal_bottom, projection
+				)
+			else:
+				bottom_y, snapped_bottom = ideal_bottom, False
 		else:
-			# Same distance below the last staff as a mid-divider
-			bottom_y = min(img_height - 1, last_bottom + margin)
+			# Gap: [last_bottom, img_height); ideal = last_bottom + margin
+			ideal_bottom = min(img_height - 1, last_bottom + margin)
+			if projection is not None and img_height > last_bottom:
+				bottom_y, snapped_bottom = _snap_to_clear_row(
+					last_bottom, img_height, ideal_bottom, projection
+				)
+			else:
+				bottom_y, snapped_bottom = ideal_bottom, False
 		dividers.append(bottom_y)
 		system_flags.append(False)
+		snap_flags.append(snapped_bottom)
 
-	return dividers, system_flags
+	return dividers, system_flags, snap_flags
 
 
 @app.route('/api/scores/<score_id>/pages/<int:page_num>/detect', methods=['POST'])
@@ -293,10 +385,11 @@ def detect_page_staves(score_id: str, page_num: int):
 			"system_count": cached["system_count"],
 			"dividers": cached["dividers"],
 			"system_flags": cached["system_flags"],
+			"snap_flags": cached.get("snap_flags", []),
 		})
 
 	page_img = score.pages[page_num].img
-	img_height, img_width = page_img.shape[:2]
+	img_height = page_img.shape[0]
 
 	try:
 		result = detect_staves(page_img)
@@ -308,8 +401,11 @@ def detect_page_staves(score_id: str, page_num: int):
 	staves = result["staves"]
 	confidence = result["confidence"]
 	reasons = result["reasons"]
+	projection = result["projection"]
 
-	dividers, sys_flags = staves_to_dividers(systems, img_height)
+	dividers, sys_flags, snap_flags = staves_to_dividers(
+		systems, img_height, projection
+	)
 
 	cache[page_num] = {
 		"confidence": confidence,
@@ -318,6 +414,7 @@ def detect_page_staves(score_id: str, page_num: int):
 		"system_count": len(systems),
 		"dividers": dividers,
 		"system_flags": sys_flags,
+		"snap_flags": snap_flags,
 	}
 
 	return jsonify({
@@ -327,6 +424,7 @@ def detect_page_staves(score_id: str, page_num: int):
 		"system_count": len(systems),
 		"dividers": dividers,
 		"system_flags": sys_flags,
+		"snap_flags": snap_flags,
 	})
 
 

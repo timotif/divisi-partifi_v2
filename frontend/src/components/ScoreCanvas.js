@@ -7,6 +7,7 @@ const ScoreCanvas = ({
   currentPage,
   dividers,
   systemDividers,
+  snapFlags,
   strips,
   stripNames,
   onRemoveDivider,
@@ -99,6 +100,10 @@ const ScoreCanvas = ({
         {/* Draggable dividers */}
         {dividers.map((y, index) => {
           const isSystem = !!systemDividers[index];
+          // snapFlags[index] values: true = snapped, false = tried but failed,
+          // null/undefined = manual divider (no snap attempted). Only false shows
+          // the amber indicator.
+          const unsnapped = snapFlags?.[index] === false;
           return (
           <div key={index}>
             {/* Divider line */}
@@ -107,22 +112,46 @@ const ScoreCanvas = ({
                 isSystem ? 'border-t-[3px] border-system' : 'border-t-2 border-accent'
               }`}
               style={{ top: y }}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
             />
+            {/* Unsnapped indicator: amber dashed overlay on the line */}
+            {unsnapped && (
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  top: y - 1,
+                  left: 0,
+                  width: '100%',
+                  height: 3,
+                  zIndex: 11,
+                  backgroundImage: 'repeating-linear-gradient(90deg, #f59e0b 0px, #f59e0b 6px, transparent 6px, transparent 12px)',
+                  opacity: 0.7,
+                }}
+                title="Divider couldn't snap to a clear gap"
+              />
+            )}
 
             {/* Draggable handle */}
             <div
               className={`absolute w-4 h-4 rounded-full cursor-ns-resize z-20 flex items-center justify-center transition-colors shadow-sm ${
                 isSystem
                   ? 'bg-system hover:bg-system/80'
-                  : 'bg-accent hover:bg-accent/80'
+                  : unsnapped
+                    ? 'bg-amber-400 hover:bg-amber-300'
+                    : 'bg-accent hover:bg-accent/80'
               }`}
               style={{
                 top: y - 8,
                 left: pageWidth - 20
               }}
-              onMouseDown={(e) => onDividerMouseDown(e, index)}
+              onMouseDown={(e) => { e.stopPropagation(); onDividerMouseDown(e, index); }}
               onClick={(e) => e.stopPropagation()}
-              title={isSystem ? 'System divider — drag to adjust' : 'Drag to adjust strip boundary'}
+              title={
+                unsnapped
+                  ? (isSystem ? 'System divider — couldn\'t snap to clear gap' : 'Couldn\'t snap to clear gap — drag to adjust')
+                  : (isSystem ? 'System divider — drag to adjust' : 'Drag to adjust strip boundary')
+              }
             >
               {isSystem
                 ? <div className="w-2 h-0.5 bg-white" />
@@ -137,6 +166,7 @@ const ScoreCanvas = ({
                 top: y - 8,
                 left: pageWidth - 36
               }}
+              onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => { e.stopPropagation(); onRemoveDivider(index); }}
               title="Remove this divider"
             >
