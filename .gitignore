@@ -50,6 +50,9 @@ tmp/
 *.tmp
 *.temp
 
+# Persistent storage (PDFs, generated parts, SQLite DB)
+backend/storage/
+
 # Frontend (React/Node.js)
 frontend/node_modules/
 frontend/build/

@@ -3,7 +3,6 @@ import os
 import io
 import uuid
 import time
-import logging
 import cv2
 import numpy as np
 import pymupdf as fitz
@@ -14,6 +13,7 @@ from analyzer import (
 	sanitize_string, PageError, StaffError, PartError
 )
 from detection.projection import detect_staves
+import db
 
 logger = logging.getLogger(__name__)
 
@@ -69,24 +69,78 @@ def internal_error(e):
 
 
 def _validate_score_id(score_id: str) -> dict:
-	"""Validate UUID format and look up score. Aborts with 400/404 on failure.
-	Refreshes the session TTL on successful access."""
+	"""Validate UUID format and look up score in the in-memory cache.
+
+	On a cache miss, attempt a lazy restore from the database:
+	  1. Look up the score row in SQLite.
+	  2. Verify the PDF file exists on disk.
+	  3. Re-extract pages (300 DPI) from the persisted PDF.
+	  4. Populate the in-memory cache so subsequent requests are fast.
+
+	Aborts with 400/404 on invalid ID or missing score.
+	"""
 	try:
 		uuid.UUID(score_id)
 	except ValueError:
 		abort(400, description="Invalid score ID format")
+
 	entry = scores.get(score_id)
-	if not entry:
+	if entry:
+		entry['created_at'] = time.time()
+		return entry
+
+	# Cache miss — try to restore from DB
+	row = db.get_score(score_id)
+	if not row:
 		abort(404, description="Score not found")
-	entry['created_at'] = time.time()
-	return entry
+
+	pdf_file = db.pdf_path(score_id)
+	if not os.path.exists(pdf_file):
+		logger.warning("Score %s exists in DB but PDF is missing from disk", score_id)
+		abort(404, description="Score PDF not found on disk; please re-upload")
+
+	try:
+		score = Score(
+			path=pdf_file,
+			title=row["title"],
+			composer=row["composer"],
+			keep_temp_files=False,
+		)
+		score._extract_pages(dpi=300)
+	except Exception:
+		logger.exception("Failed to re-extract pages for score %s", score_id)
+		abort(500, description="Failed to restore score from disk")
+
+	import json
+	pages_meta = json.loads(row["pages_meta"])
+
+	_evict_expired_sessions()
+	scores[score_id] = {
+		"score": score,
+		"created_at": time.time(),
+		"detection_cache": {},
+		"metadata": {
+			"score_id": score_id,
+			"title": row["title"],
+			"composer": row["composer"],
+			"page_count": row["page_count"],
+			"pages": pages_meta,
+		},
+	}
+	db.touch_score(score_id)
+	return scores[score_id]
 
 
 # --- Endpoints ---
 
 @app.route('/api/upload', methods=['POST'])
 def upload_score():
-	"""Accept a PDF upload, extract pages, return metadata."""
+	"""Accept a PDF upload, persist to disk, extract pages, return metadata.
+
+	Detects duplicate uploads via SHA-256 hash and returns 409 if the same
+	PDF already exists in the library.  Pass ?force=1 to skip the check and
+	upload as a new entry anyway.
+	"""
 	if 'file' not in request.files:
 		abort(400, description="No file provided")
 
@@ -95,49 +149,74 @@ def upload_score():
 		abort(400, description="Only PDF files are accepted")
 
 	title = request.form.get('title') or os.path.splitext(file.filename)[0]
-	composer = request.form.get('composer') or "Unknown"
+	composer = request.form.get('composer') or ""
+	force = request.args.get('force', '0') == '1'
+
+	# Read bytes once so we can hash and also save to disk
+	pdf_bytes = file.read()
+	pdf_hash = db.sha256_of_bytes(pdf_bytes)
+
+	# Duplicate detection (skip when ?force=1)
+	if not force:
+		existing = db.get_score_by_hash(pdf_hash)
+		if existing:
+			return jsonify({
+				"duplicate": True,
+				"score_id": existing["score_id"],
+				"title": existing["title"],
+				"composer": existing["composer"],
+			}), 409
 
 	score_id = str(uuid.uuid4())
-	pdf_path = os.path.join(TMP_DIR, f"{score_id}.pdf")
+	dest_path = db.pdf_path(score_id)
+
+	# Write PDF to persistent storage before extracting pages
+	os.makedirs(db.PDFS_DIR, exist_ok=True)
+	with open(dest_path, 'wb') as f:
+		f.write(pdf_bytes)
 
 	try:
-		os.makedirs(TMP_DIR, exist_ok=True)
-		file.save(pdf_path)
-
 		score = Score(
-			path=pdf_path,
+			path=dest_path,
 			title=title,
 			composer=composer,
-			keep_temp_files=False
+			keep_temp_files=False,
 		)
 		score._extract_pages(dpi=300)
-	except Exception as e:
+	except Exception:
 		logger.exception("PDF processing failed for upload")
-		if os.path.exists(pdf_path):
-			os.remove(pdf_path)
+		# Clean up the written file on failure
+		if os.path.exists(dest_path):
+			os.remove(dest_path)
 		abort(500, description="Failed to process the uploaded PDF")
-	finally:
-		# Clean up uploaded PDF — pages are already extracted into memory
-		if os.path.exists(pdf_path):
-			os.remove(pdf_path)
 
 	pages_meta = []
 	for i, page in enumerate(score.pages):
 		h, w = page.img.shape[:2]
 		pages_meta.append({"page_num": i, "width": w, "height": h})
 
-	_evict_expired_sessions()
+	# Persist score metadata to the database
+	db.insert_score(
+		score_id=score_id,
+		title=sanitize_string(title),
+		composer=sanitize_string(composer),
+		page_count=len(score.pages),
+		pages_meta=pages_meta,
+		pdf_hash=pdf_hash,
+	)
 
+	_evict_expired_sessions()
 	scores[score_id] = {
 		"score": score,
 		"created_at": time.time(),
+		"detection_cache": {},
 		"metadata": {
 			"score_id": score_id,
 			"title": score.title,
 			"composer": score.composer,
 			"page_count": len(score.pages),
 			"pages": pages_meta,
-		}
+		},
 	}
 
 	return jsonify(scores[score_id]["metadata"]), 201
@@ -752,6 +831,35 @@ def serve_stave_image(score_id: str, part_name: str, stave_index: int):
 	return send_file(io.BytesIO(buf.tobytes()), mimetype='image/png')
 
 
+def _build_part_pdf_bytes(part) -> bytes:
+	"""Render a Part's output pages to PDF bytes using PyMuPDF.
+
+	Encodes each page image as JPEG (quality 92) and inserts it into a
+	page-sized PDF page.  Pixel dimensions are converted to 72-DPI points
+	using part.dpi.
+
+	Returns:
+		PDF bytes, or empty bytes if the part has no rendered pages.
+	"""
+	if not part.pages:
+		return b""
+	pdf_doc = fitz.open()
+	for page_img in part.pages:
+		success, jpg_buf = cv2.imencode('.jpg', page_img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+		if not success:
+			pdf_doc.close()
+			raise RuntimeError(f"Failed to JPEG-encode page for part '{part.name}'")
+		img_bytes = jpg_buf.tobytes()
+		h_px, w_px = page_img.shape[:2]
+		w_pt = w_px * 72 / part.dpi
+		h_pt = h_px * 72 / part.dpi
+		pdf_page = pdf_doc.new_page(width=w_pt, height=h_pt)
+		pdf_page.insert_image(fitz.Rect(0, 0, w_pt, h_pt), stream=img_bytes)
+	pdf_bytes = pdf_doc.tobytes()
+	pdf_doc.close()
+	return pdf_bytes
+
+
 @app.route('/api/scores/<score_id>/generate', methods=['POST'])
 def generate_parts(score_id: str):
 	"""Render parts into output pages using per-part layout adjustments.
@@ -766,6 +874,9 @@ def generate_parts(score_id: str):
 	    }
 	  }
 	}
+
+	After rendering, caches the generated PDFs to disk and records them
+	in the database so they survive server restarts.
 	"""
 	entry = _validate_score_id(score_id)
 	score = entry["score"]
@@ -805,6 +916,33 @@ def generate_parts(score_id: str):
 		logger.exception("Part processing failed during generate")
 		abort(500, description="Part processing failed")
 
+	# --- Cache generated PDFs to disk ---
+	db.invalidate_generated_parts(score_id)  # remove old files + DB rows
+	parts_dir = os.path.join(db.PARTS_DIR, score_id)
+	os.makedirs(parts_dir, exist_ok=True)
+
+	saved_parts = []
+	for part in score.parts:
+		if not part.pages:
+			continue
+		sanitized = sanitize_string(part.name)
+		try:
+			pdf_bytes = _build_part_pdf_bytes(part)
+		except RuntimeError:
+			logger.exception("Failed to encode PDF for part '%s'", part.name)
+			abort(500, description=f"Failed to encode PDF for part '{part.name}'")
+
+		dest = db.part_pdf_path(score_id, sanitized)
+		with open(dest, 'wb') as f:
+			f.write(pdf_bytes)
+		saved_parts.append({
+			"name": part.name,
+			"page_count": len(part.pages),
+			"staves_count": len(part.staves),
+		})
+
+	db.save_generated_parts(score_id, saved_parts)
+
 	return jsonify({
 		"parts": [
 			{
@@ -820,7 +958,11 @@ def generate_parts(score_id: str):
 
 @app.route('/api/scores/<score_id>/parts/<part_name>', methods=['GET'])
 def download_part(score_id: str, part_name: str):
-	"""Serve a generated part as a PDF composed from the output page images."""
+	"""Serve a generated part as a PDF.
+
+	Checks the on-disk cache first.  Falls back to building from in-memory
+	rendered pages.  Returns 404 if neither is available (user must re-generate).
+	"""
 	entry = _validate_score_id(score_id)
 	score = entry["score"]
 
@@ -828,45 +970,211 @@ def download_part(score_id: str, part_name: str):
 	if not part_name:
 		abort(400, description="Invalid part name")
 
+	# --- Try cached file first ---
+	cached_path = db.part_pdf_path(score_id, part_name)
+	if os.path.exists(cached_path):
+		return send_file(
+			cached_path,
+			mimetype='application/pdf',
+			as_attachment=True,
+			download_name=f"{part_name}.pdf",
+		)
+
+	# --- Fallback: build from in-memory rendered pages ---
 	if not score.parts_dict:
-		abort(404, description="No parts generated yet. Run partition first.")
+		abort(404, description="No parts generated yet. Run partition and generate first.")
 
 	part = score.parts_dict.get(part_name)
 	if not part:
 		abort(404, description=f"Part '{part_name}' not found")
 
 	if not part.pages:
-		abort(404, description=f"Part '{part_name}' has no output pages")
+		abort(404, description=f"Part '{part_name}' has no output pages. Re-generate parts first.")
 
-	# Build a PDF from the part's output page images using PyMuPDF
-	pdf_doc = fitz.open()
-	for page_img in part.pages:
-		success, jpg_buf = cv2.imencode('.jpg', page_img, [cv2.IMWRITE_JPEG_QUALITY, 92])
-		if not success:
-			logger.error("Failed to encode page image for part '%s'", part_name)
-			abort(500, description="Failed to encode page image")
-
-		img_bytes = jpg_buf.tobytes()
-		# Create a page matching the image dimensions (in points: 72 DPI)
-		h_px, w_px = page_img.shape[:2]
-		w_pt = w_px * 72 / part.dpi
-		h_pt = h_px * 72 / part.dpi
-		pdf_page = pdf_doc.new_page(width=w_pt, height=h_pt)
-		pdf_page.insert_image(fitz.Rect(0, 0, w_pt, h_pt), stream=img_bytes)
-
-	pdf_bytes = pdf_doc.tobytes()
-	pdf_doc.close()
+	try:
+		pdf_bytes = _build_part_pdf_bytes(part)
+	except RuntimeError:
+		logger.exception("Failed to encode PDF for part '%s'", part_name)
+		abort(500, description="Failed to encode page image")
 
 	return send_file(
 		io.BytesIO(pdf_bytes),
 		mimetype='application/pdf',
 		as_attachment=True,
-		download_name=f"{part_name}.pdf"
+		download_name=f"{part_name}.pdf",
 	)
 
 
+# --- Setup persistence endpoints ---
+
+@app.route('/api/scores/<score_id>/setup', methods=['POST'])
+def save_setup(score_id: str):
+	"""Persist the current editor setup for a score.
+
+	Request JSON:
+	{
+	  "display_width": 600,
+	  "version_name": "v1",   // optional, defaults to "Default"
+	  "setup": { ...setup_json... }
+	}
+
+	Response: { "saved": true, "setup_id": N }
+	"""
+	_validate_score_id(score_id)  # ensure score exists (lazy restore if needed)
+
+	data = request.get_json()
+	if not data:
+		abort(400, description="Missing request body")
+
+	display_width = data.get('display_width')
+	if not display_width or display_width <= 0:
+		abort(400, description="'display_width' must be a positive number")
+
+	setup_dict = data.get('setup')
+	if setup_dict is None:
+		abort(400, description="Missing 'setup' in request body")
+
+	version_name = sanitize_string(data.get('version_name') or 'Default') or 'Default'
+
+	setup_id = db.save_setup(score_id, version_name, display_width, setup_dict)
+	db.touch_score(score_id)
+
+	return jsonify({"saved": True, "setup_id": setup_id})
+
+
+@app.route('/api/scores/<score_id>/setup', methods=['GET'])
+def load_setup(score_id: str):
+	"""Load a named setup version for a score, triggering lazy re-extraction if needed.
+
+	Query param: ?version=<name>  (default: "Default")
+
+	Response:
+	{
+	  "setup": { ...setup_json... } | null,
+	  "display_width": int | null,
+	  "version_name": str | null,
+	  "setup_id": int | null,
+	  "saved_at": float | null,
+	  "versions": [{ "setup_id", "version_name", "saved_at" }, ...],
+	  "pages": [{ "page_num", "width", "height" }, ...],
+	  "generated_parts": [{ "name", "page_count", "staves_count" }, ...]
+	}
+	"""
+	entry = _validate_score_id(score_id)  # triggers lazy re-extraction
+
+	version_name = sanitize_string(request.args.get('version', 'Default')) or 'Default'
+
+	setup_data = db.load_setup(score_id, version_name)
+	versions = db.list_setups(score_id)
+	gen_parts = db.get_generated_parts(score_id)
+	pages_meta = entry["metadata"]["pages"]
+
+	return jsonify({
+		"setup":        setup_data["setup"] if setup_data else None,
+		"display_width": setup_data["display_width"] if setup_data else None,
+		"version_name": setup_data["version_name"] if setup_data else None,
+		"setup_id":     setup_data["setup_id"] if setup_data else None,
+		"saved_at":     setup_data["saved_at"] if setup_data else None,
+		"versions":     versions,
+		"pages":        pages_meta,
+		"generated_parts": [
+			{
+				"name":         r["part_name"],
+				"page_count":   r["page_count"],
+				"staves_count": r["staves_count"],
+			}
+			for r in gen_parts
+		],
+	})
+
+
+@app.route('/api/scores/<score_id>/setup/<version_name>', methods=['DELETE'])
+def delete_setup_version(score_id: str, version_name: str):
+	"""Delete a named setup version.
+
+	Response: { "deleted": true } or 404 if version not found.
+	"""
+	_validate_score_id(score_id)
+	version_name = sanitize_string(version_name)
+	if not version_name:
+		abort(400, description="Invalid version name")
+
+	removed = db.delete_setup(score_id, version_name)
+	if not removed:
+		abort(404, description=f"Setup version '{version_name}' not found")
+
+	return jsonify({"deleted": True})
+
+
+# --- Library endpoints ---
+
+@app.route('/api/library', methods=['GET'])
+def list_library():
+	"""Return all scores in the library, ordered by updated_at descending.
+
+	Pure DB reads — no Score objects loaded, no PDF extraction.
+
+	Response:
+	{
+	  "scores": [{
+	    "score_id", "title", "composer", "page_count",
+	    "created_at", "updated_at",
+	    "setup_versions": ["Default", "v2", ...],
+	    "generated_parts": ["Violin I", "Violin II", ...]
+	  }, ...]
+	}
+	"""
+	rows = db.list_scores()
+	result = []
+	for row in rows:
+		versions = db.list_setups(row["score_id"])
+		gen_parts = db.get_generated_parts(row["score_id"])
+		result.append({
+			"score_id":       row["score_id"],
+			"title":          row["title"],
+			"composer":       row["composer"],
+			"page_count":     row["page_count"],
+			"created_at":     row["created_at"],
+			"updated_at":     row["updated_at"],
+			"setup_versions": [v["version_name"] for v in versions],
+			"generated_parts": [r["part_name"] for r in gen_parts],
+		})
+
+	return jsonify({"scores": result})
+
+
+@app.route('/api/scores/<score_id>', methods=['DELETE'])
+def delete_score(score_id: str):
+	"""Delete a score and all associated files.
+
+	Removes: PDF file, generated-part PDFs (directory), DB rows.
+	"""
+	try:
+		uuid.UUID(score_id)
+	except ValueError:
+		abort(400, description="Invalid score ID format")
+
+	# Remove PDF file
+	pdf_file = db.pdf_path(score_id)
+	if os.path.exists(pdf_file):
+		os.remove(pdf_file)
+
+	# Remove generated parts directory
+	parts_dir = os.path.join(db.PARTS_DIR, score_id)
+	if os.path.isdir(parts_dir):
+		import shutil
+		shutil.rmtree(parts_dir)
+
+	# Remove DB rows (CASCADE handles setups + generated_parts)
+	db.delete_score(score_id)
+
+	# Evict from in-memory cache
+	scores.pop(score_id, None)
+
+	return jsonify({"deleted": True})
+
+
 if __name__ == '__main__':
+	db.init_db()
 	os.makedirs(TMP_DIR, exist_ok=True)
 	app.run(debug=os.getenv('FLASK_DEBUG', 'true').lower() == 'true', port=5000) # TODO: change to false in production
-
-	

@@ -7,6 +7,7 @@ import StripNamesColumn from './components/StripNamesColumn';
 import ScoreCanvas from './components/ScoreCanvas';
 import AnnotationsPanel from './components/AnnotationsPanel';
 import LayoutPreview from './components/LayoutPreview';
+import LibraryScreen from './components/LibraryScreen';
 
 const STRIP_COLUMN_WIDTH = 160;
 const ANNOTATIONS_PANEL_WIDTH = 176; // w-44 = 11rem = 176px
@@ -15,7 +16,7 @@ const MIN_PAGE_WIDTH = 400;
 
 const MusicPartitioner = () => {
   // --- App lifecycle ---
-  const [phase, setPhase] = useState('upload'); // 'upload' | 'edit' | 'exporting' | 'preview' | 'generating'
+  const [phase, setPhase] = useState('upload'); // 'upload' | 'library' | 'edit' | 'exporting' | 'preview' | 'generating'
 
   // --- Score metadata from backend ---
   const [scoreId, setScoreId] = useState(null);
@@ -74,6 +75,17 @@ const MusicPartitioner = () => {
   const [dragOffset, setDragOffset] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
+
+  // --- Library state ---
+  const [libraryScores, setLibraryScores] = useState([]);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState(null);
+
+  // --- Duplicate upload modal ---
+  const [duplicateInfo, setDuplicateInfo] = useState(null); // { score_id, title, composer, pendingFile }
+
+  // --- Auto-save version name (editable by user) ---
+  const [autoSaveVersionName, setAutoSaveVersionName] = useState('Default');
 
   const containerRef = useRef(null);
 
@@ -331,8 +343,72 @@ const MusicPartitioner = () => {
     setConfirmedPages(prev => new Set(prev).add(currentPage));
   }, [currentPage]);
 
+  // --- Auto-save effect (debounced 2 seconds, fires during edit phase) ---
+  useEffect(() => {
+    if (!scoreId || phase !== 'edit') return;
+    const timer = setTimeout(() => {
+      const setupPayload = {
+        dividersByPage,
+        systemDividersByPage,
+        snapFlagsByPage,
+        stripNamesByPage,
+        confirmedPages: [...confirmedPages],
+        headerRegion,
+        markings,
+        spacingByPart,
+        offsetsByPart,
+        pageBreaksByPart: Object.fromEntries(
+          Object.entries(pageBreaksByPart).map(([k, v]) => [k, [...v]])
+        ),
+      };
+      fetch(`/api/scores/${scoreId}/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          display_width: pageWidth,
+          version_name: autoSaveVersionName,
+          setup: setupPayload,
+        }),
+      }).catch(err => console.warn('Auto-save failed:', err));
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [
+    scoreId, phase, pageWidth, autoSaveVersionName,
+    dividersByPage, systemDividersByPage, snapFlagsByPage,
+    stripNamesByPage, confirmedPages, headerRegion, markings,
+    spacingByPart, offsetsByPart, pageBreaksByPart,
+  ]);
+
+  // --- Helpers: reset all editor state ---
+  const _resetEditorState = (pageCount) => {
+    const initialDividers = {};
+    const initialStripNames = {};
+    const initialSystemDividers = {};
+    for (let i = 0; i < pageCount; i++) {
+      initialDividers[i] = [];
+      initialStripNames[i] = [];
+      initialSystemDividers[i] = [];
+    }
+    setDividersByPage(initialDividers);
+    setStripNamesByPage(initialStripNames);
+    setSystemDividersByPage(initialSystemDividers);
+    setSnapFlagsByPage({});
+    undoStackRef.current = [];
+    setConfirmedPages(new Set());
+    setDetectedPages(new Set());
+    setDetectingPage(null);
+    setDetectionWarnings({});
+    setHeaderRegion(null);
+    setMarkings([]);
+    setSpacingByPart({});
+    setOffsetsByPart({});
+    setPageBreaksByPart({});
+    setExportResult(null);
+    prevPageWidthRef.current = null;
+  };
+
   // --- Upload handler ---
-  const handleUpload = async (file) => {
+  const handleUpload = async (file, forceUpload = false) => {
     if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
       setError('Please select a PDF file.');
       return;
@@ -344,11 +420,21 @@ const MusicPartitioner = () => {
     const formData = new FormData();
     formData.append('file', file);
 
+    const url = forceUpload ? '/api/upload?force=1' : '/api/upload';
+
     try {
-      const response = await fetch('/api/upload', {
+      const response = await fetch(url, {
         method: 'POST',
         body: formData,
       });
+
+      // Duplicate detection
+      if (response.status === 409) {
+        const dupData = await response.json();
+        setDuplicateInfo({ ...dupData, pendingFile: file });
+        setUploading(false);
+        return;
+      }
 
       if (!response.ok) {
         const errData = await response.json();
@@ -359,27 +445,8 @@ const MusicPartitioner = () => {
       setScoreId(data.score_id);
       setScoreMetadata({ page_count: data.page_count, pages: data.pages });
       setCurrentPage(0);
-
-      const initialDividers = {};
-      const initialStripNames = {};
-      const initialSystemDividers = {};
-      for (let i = 0; i < data.page_count; i++) {
-        initialDividers[i] = [];
-        initialStripNames[i] = [];
-        initialSystemDividers[i] = [];
-      }
-      setDividersByPage(initialDividers);
-      setStripNamesByPage(initialStripNames);
-      setSystemDividersByPage(initialSystemDividers);
-      setSnapFlagsByPage({});
-      undoStackRef.current = [];
-      setConfirmedPages(new Set());
-      setDetectedPages(new Set());
-      setDetectingPage(null);
-      setDetectionWarnings({});
-      setExportResult(null);
-      // Reset prevPageWidthRef so rescaling doesn't trigger on fresh upload
-      prevPageWidthRef.current = null;
+      _resetEditorState(data.page_count);
+      setAutoSaveVersionName('Default');
 
       setPageImageUrl(`/api/scores/${data.score_id}/pages/0`);
       setPhase('edit');
@@ -387,6 +454,112 @@ const MusicPartitioner = () => {
       setError(err.message);
     } finally {
       setUploading(false);
+    }
+  };
+
+  // --- Library handlers ---
+  const handleOpenLibrary = async () => {
+    setLibraryError(null);
+    setLibraryLoading(true);
+    setPhase('library');
+    try {
+      const res = await fetch('/api/library');
+      if (!res.ok) throw new Error(`Failed to load library: ${res.status}`);
+      const data = await res.json();
+      setLibraryScores(data.scores);
+    } catch (err) {
+      setLibraryError(err.message);
+    } finally {
+      setLibraryLoading(false);
+    }
+  };
+
+  const handleRestoreScore = async (restoredScoreId, versionName = null) => {
+    setError(null);
+    try {
+      const versionParam = versionName ? `?version=${encodeURIComponent(versionName)}` : '';
+      const res = await fetch(`/api/scores/${restoredScoreId}/setup${versionParam}`);
+      if (!res.ok) throw new Error(`Failed to load score: ${res.status}`);
+      const data = await res.json();
+
+      // data.pages contains the backend page dimensions for rescaling
+      const pages = data.pages || [];
+      const pageCount = pages.length;
+      if (pageCount === 0) throw new Error('Score has no pages');
+
+      setScoreId(restoredScoreId);
+      setScoreMetadata({ page_count: pageCount, pages });
+      setCurrentPage(0);
+      _resetEditorState(pageCount);
+      setAutoSaveVersionName(data.version_name || 'Default');
+
+      if (data.setup) {
+        const s = data.setup;
+        const savedDisplayWidth = data.display_width || pageWidth || 600;
+
+        // Dividers are stored in display-pixel space at saved display width.
+        // Rescaling happens later via the pageWidth effect once layout is measured.
+        // We store them verbatim here; prevPageWidthRef drives automatic rescaling.
+        // To bootstrap correctly: set prevPageWidthRef to savedDisplayWidth so the
+        // rescale effect can compute the right ratio once pageWidth is measured.
+        prevPageWidthRef.current = savedDisplayWidth;
+
+        const restoreDividers = s.dividersByPage || {};
+        const restoreSysFlags = s.systemDividersByPage || {};
+        const restoreSnapFlags = s.snapFlagsByPage || {};
+        const restoreNames = s.stripNamesByPage || {};
+
+        // Convert string keys (JSON) back to integer-keyed objects expected by the rest of the code
+        const toIntKeys = obj => {
+          const out = {};
+          for (const [k, v] of Object.entries(obj)) out[parseInt(k, 10)] = v;
+          return out;
+        };
+
+        setDividersByPage(toIntKeys(restoreDividers));
+        setSystemDividersByPage(toIntKeys(restoreSysFlags));
+        setSnapFlagsByPage(toIntKeys(restoreSnapFlags));
+        setStripNamesByPage(toIntKeys(restoreNames));
+        setConfirmedPages(new Set((s.confirmedPages || []).map(Number)));
+        setHeaderRegion(s.headerRegion || null);
+        setMarkings(s.markings || []);
+        setSpacingByPart(s.spacingByPart || {});
+        setOffsetsByPart(s.offsetsByPart || {});
+
+        // pageBreaksByPart: arrays in JSON → Sets in state
+        const rawBreaks = s.pageBreaksByPart || {};
+        const restoredBreaks = {};
+        for (const [partName, arr] of Object.entries(rawBreaks)) {
+          restoredBreaks[partName] = new Set(arr);
+        }
+        setPageBreaksByPart(restoredBreaks);
+      }
+
+      // If generated parts exist, expose them for download
+      if (data.generated_parts && data.generated_parts.length > 0) {
+        setExportResult(data.generated_parts.map(p => ({
+          name: p.name,
+          short_name: p.name,
+          page_count: p.page_count,
+          staves_count: p.staves_count,
+        })));
+      }
+
+      setPageImageUrl(`/api/scores/${restoredScoreId}/pages/0`);
+      setPhase('edit');
+    } catch (err) {
+      setError(err.message);
+      setPhase('upload');
+    }
+  };
+
+  const handleDeleteScore = async (delScoreId) => {
+    try {
+      const res = await fetch(`/api/scores/${delScoreId}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
+      setLibraryScores(prev => prev.filter(s => s.score_id !== delScoreId));
+    } catch (err) {
+      setLibraryError(err.message);
     }
   };
 
@@ -962,9 +1135,73 @@ const MusicPartitioner = () => {
     }
   };
 
+  // --- Render: Library phase ---
+  if (phase === 'library') {
+    return (
+      <LibraryScreen
+        scores={libraryScores}
+        loading={libraryLoading}
+        error={libraryError}
+        onRestore={handleRestoreScore}
+        onDelete={handleDeleteScore}
+        onUpload={() => setPhase('upload')}
+      />
+    );
+  }
+
   // --- Render: Upload phase ---
   if (phase === 'upload') {
-    return <UploadScreen onUpload={handleUpload} uploading={uploading} error={error} />;
+    return (
+      <>
+        <UploadScreen
+          onUpload={handleUpload}
+          uploading={uploading}
+          error={error}
+          onOpenLibrary={handleOpenLibrary}
+        />
+        {/* Duplicate upload modal */}
+        {duplicateInfo && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg shadow-xl p-6 max-w-sm w-full mx-4">
+              <h2 className="text-base font-semibold text-gray-800 mb-2">Already in library</h2>
+              <p className="text-sm text-gray-600 mb-4">
+                <strong>{duplicateInfo.title}</strong>
+                {duplicateInfo.composer ? ` — ${duplicateInfo.composer}` : ''}
+                {' '}is already saved. Open the existing score or upload as a new copy?
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    const info = duplicateInfo;
+                    setDuplicateInfo(null);
+                    handleRestoreScore(info.score_id);
+                  }}
+                  className="flex-1 px-3 py-2 bg-accent text-white rounded text-sm hover:bg-accent/80 transition-colors"
+                >
+                  Open existing
+                </button>
+                <button
+                  onClick={() => {
+                    const info = duplicateInfo;
+                    setDuplicateInfo(null);
+                    handleUpload(info.pendingFile, true);
+                  }}
+                  className="flex-1 px-3 py-2 border border-surface-border rounded text-sm text-gray-600 hover:bg-gray-50 transition-colors"
+                >
+                  Upload as new
+                </button>
+                <button
+                  onClick={() => setDuplicateInfo(null)}
+                  className="px-3 py-2 text-gray-400 hover:text-gray-600 text-sm"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </>
+    );
   }
 
   // --- Render: Preview / Generating phase ---

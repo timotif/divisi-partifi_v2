@@ -1,7 +1,7 @@
 import { useRef } from 'react';
-import { Upload } from 'lucide-react';
+import { Upload, BookOpen } from 'lucide-react';
 
-const UploadScreen = ({ onUpload, uploading, error }) => {
+const UploadScreen = ({ onUpload, uploading, error, onOpenLibrary }) => {
   const fileInputRef = useRef(null);
 
   return (
@@ -31,6 +31,18 @@ const UploadScreen = ({ onUpload, uploading, error }) => {
             </button>
             {error && <p className="mt-4 text-danger text-sm">{error}</p>}
           </div>
+
+          {onOpenLibrary && (
+            <div className="mt-6 text-center">
+              <button
+                onClick={onOpenLibrary}
+                className="inline-flex items-center gap-2 text-sm text-gray-500 hover:text-accent transition-colors"
+              >
+                <BookOpen className="w-4 h-4" />
+                Browse saved scores
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
