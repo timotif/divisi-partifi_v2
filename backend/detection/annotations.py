@@ -300,24 +300,29 @@ def _find_candidates_in_band(
 # Stage 2 — OCR validation
 # ---------------------------------------------------------------------------
 
-def _ocr_text(img_gray: np.ndarray, x: int, y: int, w: int, h: int) -> str:
-    """OCR a candidate crop. Returns the cleaned text string (may be empty)."""
-    if not _TESSERACT_AVAILABLE:
+def _ocr_text_crop(crop: np.ndarray) -> str:
+    """OCR a pre-cropped grayscale image. Returns cleaned text (may be empty).
+
+    Upscales 2× (cubic) before passing to Tesseract. Uses PSM 11 (sparse
+    text) with Italian+English model — best for italic serif score fonts.
+    """
+    if not _TESSERACT_AVAILABLE or crop.size == 0:
         return ''
 
-    crop = img_gray[y:y + h, x:x + w]
-    if crop.size == 0:
-        return ''
-
+    big = cv.resize(crop, None, fx=2, fy=2, interpolation=cv.INTER_CUBIC)
     try:
-        # PSM 6: uniform block of text — better than PSM 7 for multi-word clusters
-        raw = pytesseract.image_to_string(crop, config='--psm 6 --oem 1').strip()
+        raw = pytesseract.image_to_string(
+            big, config='--psm 11 --oem 1 -l ita+eng'
+        ).strip()
     except Exception:
-        logger.debug("Tesseract failed on crop (%d,%d,%d,%d)", x, y, w, h)
+        logger.debug("Tesseract failed on crop shape %s", crop.shape)
         return ''
-
-    # Strip non-printable / control characters
     return re.sub(r'[^\x20-\x7E\xC0-\xFF]', '', raw).strip()
+
+
+def _ocr_text(img_gray: np.ndarray, x: int, y: int, w: int, h: int) -> str:
+    """OCR a region of a full-page image given bounding box coords."""
+    return _ocr_text_crop(img_gray[y:y + h, x:x + w])
 
 
 def _ocr_validate(
@@ -454,8 +459,6 @@ def detect_instrument_labels(
     if not _TESSERACT_AVAILABLE:
         return []
 
-    _, binary = cv.threshold(img, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU)
-
     all_systems: list[list[dict]] = []
     for sys_idx, system in enumerate(systems):
         # Determine scan width for this system from barline_x
@@ -471,8 +474,13 @@ def detect_instrument_labels(
             ])
             continue
 
-        # scan_width = barline_x so we stay strictly left of the barline
-        scan_width = max(10, barline_x)
+        # Use bracket_x (left edge of bracket/barline complex) as the right
+        # bound so the bracket itself is excluded from the crop. Falls back to
+        # barline_x if bracket_x was not recorded (older barline_info dicts).
+        bracket_x: int | None = None
+        if barline_info and sys_idx < len(barline_info):
+            bracket_x = barline_info[sys_idx].get('bracket_x')
+        scan_width = max(10, bracket_x if bracket_x is not None else barline_x)
 
         system_labels: list[dict] = []
         for stave in system:
@@ -480,36 +488,10 @@ def detect_instrument_labels(
             stave_top    = max(0,          int(stave[0])  - 8)
             stave_bottom = min(img_height, int(stave[-1]) + 8)
 
-            binary_crop = binary[stave_top:stave_bottom, 0:scan_width]
-            n, _, stats, _ = cv.connectedComponentsWithStats(binary_crop, connectivity=8)
-
-            blobs: list[tuple[int, int, int, int]] = []
-            for i in range(1, n):
-                x    = int(stats[i, cv.CC_STAT_LEFT])
-                y    = int(stats[i, cv.CC_STAT_TOP]) + stave_top
-                w    = int(stats[i, cv.CC_STAT_WIDTH])
-                h    = int(stats[i, cv.CC_STAT_HEIGHT])
-                area = int(stats[i, cv.CC_STAT_AREA])
-                if area < _CC_MIN_AREA:
-                    continue
-                # Discard blobs spanning almost the full scan width (barline itself)
-                if w >= scan_width * 0.85:
-                    continue
-                blobs.append((x, y, w, h))
-
-            if not blobs:
-                system_labels.append({'name': '', 'short_name': '', 'is_abbreviated': False})
-                continue
-
-            # OCR each blob left-to-right; keep those with enough alpha chars
-            label_parts: list[str] = []
-            for x, y, w, h in sorted(blobs, key=lambda b: b[0]):
-                text = _ocr_text(img, x, y, w, h)
-                alpha_count = sum(1 for c in text if c.isalpha())
-                if _LABEL_MIN_ALPHA <= alpha_count <= _LABEL_MAX_ALPHA:
-                    label_parts.append(text.strip())
-
-            label = ' '.join(label_parts).strip()
+            # OCR the whole stave strip at once — one call per stave is more
+            # accurate than per-blob calls because Tesseract uses word context.
+            strip_crop = img[stave_top:stave_bottom, 0:scan_width]
+            label = _ocr_text_crop(strip_crop)
             # Strip leading non-alpha chars (misread clefs, brackets)
             label = re.sub(r'^[^A-Za-zÀ-ÿ]+', '', label).strip()
 

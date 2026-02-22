@@ -866,7 +866,7 @@ def cluster_into_systems(staves, binary=None):
                 barline_info.append({'x': None, 'span': None})
                 continue
             span = detect_system_barlines(binary, x, y_top, y_bottom)
-            barline_info.append({'x': x, 'span': span})
+            barline_info.append({'x': x, 'span': span, 'bracket_x': rough})
     else:
         barline_info = [{'x': None, 'span': None}] * len(systems)
 

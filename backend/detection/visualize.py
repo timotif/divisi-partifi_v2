@@ -60,10 +60,12 @@ def label_crop_grid(stave_result: dict) -> None:
         bx   = info.get('x')
         if bx is None:
             continue   # unlabeled system — no label column
+        # bracket_x excludes the bracket from the crop, matching OCR input
+        scan_right = info.get('bracket_x') or bx
         for ti, stave in enumerate(system):
             st   = max(0,           int(stave[0])  - 8)
             sb   = min(img_height,  int(stave[-1]) + 8)
-            crop = gray[st:sb, 0:bx]
+            crop = gray[st:sb, 0:scan_right]
             name = (label_grid[si][ti]['name']
                     if si < len(label_grid) and ti < len(label_grid[si])
                     else '')
