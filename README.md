@@ -84,13 +84,27 @@ frontend/src/
     ExportResults.js   Part download links
 ```
 
-### Key features
+## Features
 
-- **Automatic staff detection**: Each page is analyzed on view using horizontal projection profiles to detect staff lines, cluster them into staves, and group staves into systems. Dividers are placed automatically with consistent margins. The detection pipeline is modular — divider placement logic is separated from the detection algorithm for future refinement (e.g., collision-aware positioning).
-- **System dividers**: Shift+click adds a system divider (red) to mark where a new system group begins. Regular click adds a part divider (blue) between individual staves. Auto-fill resets at each system boundary.
-- **Auto-fill naming**: Name the instruments once in the first system. Subsequent staves and pages auto-fill by cycling through the known sequence.
-- **Layout preview**: Client-side pagination distributes staves across A4 pages. Drag staves to adjust vertical position, click between staves to insert forced page breaks, and use the spacing slider (8-16mm) to control density.
-- **Marking placement**: Header and tempo markings are selected as rectangles and automatically repositioned on each part's output pages with collision avoidance.
+Everything partifi.org did:
+
+- **Upload a PDF score** and extract individual instrument parts
+- **Automatic staff detection** — staves are detected automatically; you can adjust, add, or remove any divider
+- **Auto-fill naming** — name the instruments once in the first system; subsequent staves and pages fill in automatically
+- **Persistent library** — uploaded scores and their layouts are saved to disk; come back later and pick up where you left off
+- **Free** — no account, no subscription, no strings attached
+
+Things we always wished it had:
+
+- **System dividers and dead zones** — shift+click marks where a new system begins; the dead space between systems is excluded and never ends up in a part
+- **Header and markings** — select the title block and tempo/dynamic markings as rectangles once; they travel automatically to every part, repositioned to avoid collisions
+- **Layout preview with per-part control** — adjust system spacing (8–16mm), drag individual staves vertically, and insert forced page breaks per part before generating anything
+
+## A note on partifi.org
+
+Divisi exists because of [partifi.org](https://partifi.org). For years it was the quiet workhorse of musicians everywhere — paste in a score, get your parts, go rehearse. Simple, fast, genuinely useful, and free.
+
+At some point it broke, and attempts to reach the developers went unanswered. Its source code was never released, so there was no way to fix it or carry it forward. The tools that filled the gap are mostly paid. Divisi is an attempt to bring back what partifi offered, and keep it free and open.
 
 ## Support
 
