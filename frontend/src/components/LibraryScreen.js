@@ -169,7 +169,11 @@ function ScoreCard({ score, onRestore, onDelete, onUpdate }) {
       {/* Score edit modal */}
       {editingScore && (
         <ScoreModal
-          score={score}
+          score={{
+            ...score,
+            composer: composerDisplay,
+            composer_id: primaryComposer?.composer_id || null,
+          }}
           onSave={(updated) => {
             setEditingScore(false);
             onUpdate(score.score_id, updated);
@@ -210,7 +214,7 @@ function ComposersTab() {
 
   useEffect(() => { load(); }, []);
 
-  const handleSaved = (composerObj) => {
+  const handleSaved = (_composerObj) => {
     setEditing(null);
     setCreating(false);
     // Refresh the list to reflect saved changes
@@ -250,9 +254,9 @@ function ComposersTab() {
                 <span className="text-sm text-gray-800">
                   {c.name ? `${c.surname}, ${c.name}` : c.surname}
                 </span>
-                {(c.period || c.nationality) && (
+                {(c.dob || c.dod) && (
                   <span className="ml-2 text-xs text-gray-400">
-                    {[c.period, c.nationality].filter(Boolean).join(' · ')}
+                    {c.dob || '?'}–{c.dod || ''}
                   </span>
                 )}
               </div>

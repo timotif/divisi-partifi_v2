@@ -43,8 +43,8 @@ function composerLabel(c) {
  *   onSelect     {fn(obj|null)}  Called with { composer_id, displayName } on lock,
  *                                or null on clear
  */
-const ComposerInput = ({ value, onChange, onSelect }) => {
-  const [locked, setLocked]                   = useState(false);
+const ComposerInput = ({ value, onChange, onSelect, initialLocked = false }) => {
+  const [locked, setLocked]                   = useState(initialLocked);
   const [pendingComposer, setPendingComposer] = useState(null);
   const wrapperRef = useRef(null);
 

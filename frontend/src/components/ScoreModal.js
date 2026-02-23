@@ -1,26 +1,33 @@
 import { useState } from 'react';
 import { X } from 'lucide-react';
+import ComposerInput from './ComposerInput';
 
 /**
  * Modal for editing a composition (score metadata).
  *
  * Props:
- *   score    object — pre-filled values: { score_id, title, composer }
- *   onSave   fn({ title, composer }) — called after successful save
+ *   score    object — pre-filled values: { score_id, title, composer, composer_id? }
+ *   onSave   fn({ title, composer, composer_id }) — called after successful save
  *   onClose  fn()  — called on × / Escape / backdrop click
  */
 const ScoreModal = ({ score, onSave, onClose }) => {
-  const [fields, setFields] = useState({
-    title:    score.title    || '',
-    composer: score.composer || '',
-  });
-  const [saving, setSaving] = useState(false);
-  const [error, setError]   = useState(null);
+  const [title, setTitle]               = useState(score.title    || '');
+  const [composerText, setComposerText] = useState(score.composer || '');
+  const [composerId, setComposerId]     = useState(score.composer_id || null);
+  const [saving, setSaving]             = useState(false);
+  const [error, setError]               = useState(null);
 
-  const set = (key) => (e) => setFields(prev => ({ ...prev, [key]: e.target.value }));
+  const handleComposerSelect = (sel) => {
+    if (sel) {
+      setComposerId(sel.composer_id);
+      setComposerText(sel.displayName);
+    } else {
+      setComposerId(null);
+    }
+  };
 
   const handleSave = async () => {
-    if (!fields.title.trim()) {
+    if (!title.trim()) {
       setError('Title is required.');
       return;
     }
@@ -28,16 +35,19 @@ const ScoreModal = ({ score, onSave, onClose }) => {
     setError(null);
 
     try {
+      const body = { title: title.trim(), composer: composerText };
+      if (composerId) body.composer_id = composerId;
+
       const res = await fetch(`/api/scores/${score.score_id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(fields),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const d = await res.json();
         throw new Error(d.error || 'Update failed');
       }
-      onSave(fields);
+      onSave({ title: title.trim(), composer: composerText, composer_id: composerId });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -64,19 +74,32 @@ const ScoreModal = ({ score, onSave, onClose }) => {
         </div>
 
         {/* Body */}
-        <div className="px-5 py-4 overflow-y-auto space-y-3 flex-1">
+        <div className="px-5 py-4 space-y-3">
           {error && (
             <p className="text-xs text-danger bg-red-50 border border-red-200 rounded px-3 py-2">
               {error}
             </p>
           )}
-          <Field label="Title *" value={fields.title} onChange={set('title')} />
-          <Field
-            label="Composer"
-            value={fields.composer}
-            onChange={set('composer')}
-            placeholder="e.g. Brahms, Johannes"
-          />
+
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Title *</label>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className="w-full px-3 py-2 border border-surface-border rounded-md text-sm text-gray-700 placeholder-gray-400 focus:outline-none focus:border-accent"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Composer</label>
+            <ComposerInput
+              value={composerText}
+              onChange={setComposerText}
+              onSelect={handleComposerSelect}
+              initialLocked={!!score.composer_id}
+            />
+          </div>
         </div>
 
         {/* Footer */}
@@ -99,20 +122,5 @@ const ScoreModal = ({ score, onSave, onClose }) => {
     </div>
   );
 };
-
-function Field({ label, value, onChange, placeholder }) {
-  return (
-    <div>
-      <label className="block text-xs text-gray-500 mb-1">{label}</label>
-      <input
-        type="text"
-        value={value}
-        onChange={onChange}
-        placeholder={placeholder || ''}
-        className="w-full px-3 py-2 border border-surface-border rounded-md text-sm text-gray-700 placeholder-gray-400 focus:outline-none focus:border-accent"
-      />
-    </div>
-  );
-}
 
 export default ScoreModal;

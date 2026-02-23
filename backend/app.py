@@ -10,7 +10,7 @@ from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
 from analyzer import (
 	Score, Staff, Part, TMP_DIR,
-	sanitize_string, PageError, StaffError, PartError
+	sanitize_string, sanitize_url, PageError, StaffError, PartError
 )
 from detection.projection import detect_staves
 import db
@@ -1198,8 +1198,8 @@ def create_composer():
     dob          = sanitize_string(data.get('dob') or '') or None
     dod          = sanitize_string(data.get('dod') or '') or None
     period       = sanitize_string(data.get('period') or '') or None
-    imslp_url    = sanitize_string(data.get('imslp_url') or '') or None
-    wikipedia_url = sanitize_string(data.get('wikipedia_url') or '') or None
+    imslp_url    = sanitize_url(data.get('imslp_url') or '') or None
+    wikipedia_url = sanitize_url(data.get('wikipedia_url') or '') or None
     notes        = sanitize_string(data.get('notes') or '') or None
 
     raw_gender = data.get('gender')
@@ -1250,10 +1250,17 @@ def update_composer(composer_id: str):
         'surname', 'name', 'nationality', 'dob', 'dod',
         'period', 'imslp_url', 'wikipedia_url', 'notes',
     }
+    _url_fields = {'imslp_url', 'wikipedia_url'}
+    _required_fields = {'surname', 'name', 'nationality'}
     fields = {}
     for key in _updatable:
         if key in data:
-            fields[key] = sanitize_string(data[key] or '') or None if key not in ('surname', 'name', 'nationality') else sanitize_string(data[key] or '')
+            if key in _url_fields:
+                fields[key] = sanitize_url(data[key] or '') or None
+            elif key in _required_fields:
+                fields[key] = sanitize_string(data[key] or '')
+            else:
+                fields[key] = sanitize_string(data[key] or '') or None
 
     if 'gender' in data:
         fields['gender'] = data['gender'] if data['gender'] in _VALID_GENDERS else None
@@ -1391,9 +1398,11 @@ def list_library():
 
 @app.route('/api/scores/<score_id>', methods=['PATCH'])
 def update_score(score_id: str):
-	"""Update title and/or composer text of an existing score.
+	"""Update title and/or composer of an existing score.
 
-	Request JSON: { "title"?: "...", "composer"?: "..." }
+	Request JSON: { "title"?: "...", "composer"?: "...", "composer_id"?: "..." }
+	  - composer_id: if provided, links the score to that composer row in the DB
+	    (and updates the legacy composer text field to match).
 	Response 200: { "updated": true }
 	"""
 	try:
@@ -1415,6 +1424,19 @@ def update_score(score_id: str):
 
 	composer = sanitize_string(data.get('composer', row['composer']) or '')
 	db.update_score_meta(score_id, title, composer)
+
+	composer_id = data.get('composer_id')
+	if composer_id:
+		composer_id = sanitize_string(str(composer_id))
+		try:
+			uuid.UUID(composer_id)
+		except ValueError:
+			abort(400, description="Invalid composer_id format")
+		try:
+			db.link_score_composer(score_id, composer_id)
+		except Exception:
+			logger.exception("Failed to link composer %s to score %s", composer_id, score_id)
+			abort(500, description="Failed to link composer")
 
 	return jsonify({"updated": True})
 

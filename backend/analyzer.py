@@ -42,6 +42,24 @@ def sanitize_string(value: str) -> str:
 	value = re.sub(r'\s+', ' ', value).strip()
 	return value[:128]
 
+
+def sanitize_url(value: str) -> str:
+	"""Sanitize a user-provided URL for safe DB storage.
+
+	Preserves the URL structure (scheme, slashes, path) while stripping
+	null bytes, non-printable characters, and leading/trailing whitespace.
+	Only http(s) URLs are accepted; anything else is returned as empty string.
+	Truncated to 512 characters.
+	"""
+	if value is None:
+		return ""
+	value = value.replace('\x00', '')
+	value = re.sub(r'[^\x20-\x7E]', '', value)
+	value = value.strip()
+	if not re.match(r'^https?://', value, re.IGNORECASE):
+		return ""
+	return value[:512]
+
 class Score:
 	def __init__(self, path: str, title: str = None, composer: str = None, keep_temp_files: bool = False):
 		self.keep_temp_files = keep_temp_files
