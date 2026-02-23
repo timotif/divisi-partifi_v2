@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { BookOpen, Trash2, FolderOpen, ChevronDown, ChevronRight, Upload, Pencil, UserRound } from 'lucide-react';
 import ComposerModal from './ComposerModal';
+import ScoreModal from './ScoreModal';
 
 // Format a Unix timestamp as a human-readable relative string.
 function formatRelative(ts) {
@@ -14,13 +15,14 @@ function formatRelative(ts) {
 }
 
 // A single score card in the library list.
-function ScoreCard({ score, onRestore, onDelete }) {
+function ScoreCard({ score, onRestore, onDelete, onUpdate }) {
   const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [selectedVersion, setSelectedVersion] = useState(
     score.setup_versions?.[0] || 'Default'
   );
   const [editingComposer, setEditingComposer] = useState(null);
+  const [editingScore, setEditingScore] = useState(false);
 
   const hasVersions = score.setup_versions && score.setup_versions.length > 0;
   const hasGenerated = score.generated_parts && score.generated_parts.length > 0;
@@ -37,7 +39,16 @@ function ScoreCard({ score, onRestore, onDelete }) {
       {/* Title row */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <h3 className="font-medium text-gray-800 truncate">{score.title}</h3>
+          <div className="flex items-center gap-1">
+            <h3 className="font-medium text-gray-800 truncate">{score.title}</h3>
+            <button
+              onClick={() => setEditingScore(true)}
+              className="shrink-0 text-gray-300 hover:text-accent transition-colors"
+              title="Edit composition"
+            >
+              <Pencil className="w-3 h-3" />
+            </button>
+          </div>
           {composerDisplay && (
             <div className="flex items-center gap-1 mt-0.5">
               <p className="text-xs text-gray-500 truncate">{composerDisplay}</p>
@@ -152,6 +163,18 @@ function ScoreCard({ score, onRestore, onDelete }) {
           composer={editingComposer}
           onSave={() => setEditingComposer(null)}
           onClose={() => setEditingComposer(null)}
+        />
+      )}
+
+      {/* Score edit modal */}
+      {editingScore && (
+        <ScoreModal
+          score={score}
+          onSave={(updated) => {
+            setEditingScore(false);
+            onUpdate(score.score_id, updated);
+          }}
+          onClose={() => setEditingScore(false)}
         />
       )}
     </div>
@@ -271,7 +294,7 @@ function ComposersTab() {
 // Library screen — top level
 // ---------------------------------------------------------------------------
 
-const LibraryScreen = ({ scores, loading, error, onRestore, onDelete, onUpload }) => {
+const LibraryScreen = ({ scores, loading, error, onRestore, onDelete, onUpdate, onUpload }) => {
   const [tab, setTab] = useState('scores'); // 'scores' | 'composers'
 
   return (
@@ -338,6 +361,7 @@ const LibraryScreen = ({ scores, loading, error, onRestore, onDelete, onUpload }
                       score={score}
                       onRestore={onRestore}
                       onDelete={onDelete}
+                      onUpdate={onUpdate}
                     />
                   ))}
                 </div>

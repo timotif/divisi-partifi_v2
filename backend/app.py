@@ -1389,6 +1389,36 @@ def list_library():
 	return jsonify({"scores": result})
 
 
+@app.route('/api/scores/<score_id>', methods=['PATCH'])
+def update_score(score_id: str):
+	"""Update title and/or composer text of an existing score.
+
+	Request JSON: { "title"?: "...", "composer"?: "..." }
+	Response 200: { "updated": true }
+	"""
+	try:
+		uuid.UUID(score_id)
+	except ValueError:
+		abort(400, description="Invalid score ID format")
+
+	data = request.get_json()
+	if not data:
+		abort(400, description="Missing request body")
+
+	row = db.get_score(score_id)
+	if not row:
+		abort(404, description="Score not found")
+
+	title = sanitize_string(data.get('title', row['title']) or '')
+	if not title:
+		abort(400, description="'title' cannot be empty")
+
+	composer = sanitize_string(data.get('composer', row['composer']) or '')
+	db.update_score_meta(score_id, title, composer)
+
+	return jsonify({"updated": True})
+
+
 @app.route('/api/scores/<score_id>', methods=['DELETE'])
 def delete_score(score_id: str):
 	"""Delete a score and all associated files.

@@ -1,7 +1,9 @@
-import { Download, Plus, Upload, Type, Clock } from 'lucide-react';
+import { useState } from 'react';
+import { Download, Plus, Upload, Type, Clock, BookOpen, RefreshCw } from 'lucide-react';
 
 const Toolbar = ({
   onNewScore,
+  onGoToLibrary,
   onAddDivider,
   onExport,
   onToggleSelectHeader,
@@ -15,7 +17,11 @@ const Toolbar = ({
   stripCount,
   autoDetect,
   onToggleAutoDetect,
+  onForceRescan,
+  isDetecting,
 }) => {
+  const [rescanConfirm, setRescanConfirm] = useState(false);
+
   return (
     <div className="mb-6">
       <div className="flex items-center justify-between">
@@ -40,6 +46,43 @@ const Toolbar = ({
             </button>
             Auto-detect
           </label>
+
+          {/* Rescan current page */}
+          {rescanConfirm ? (
+            <div className="flex items-center gap-1.5 px-2 py-1 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
+              <span>Discard changes?</span>
+              <button
+                onClick={() => { setRescanConfirm(false); onForceRescan(); }}
+                className="px-2 py-0.5 bg-amber-500 text-white rounded hover:bg-amber-600 transition-colors font-medium"
+              >
+                Rescan
+              </button>
+              <button
+                onClick={() => setRescanConfirm(false)}
+                className="px-2 py-0.5 text-amber-700 hover:text-amber-900 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setRescanConfirm(true)}
+              disabled={isDetecting}
+              title="Re-run auto-detection on this page (discards manual changes)"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200 disabled:opacity-40 transition-colors text-sm"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isDetecting ? 'animate-spin' : ''}`} />
+              Rescan
+            </button>
+          )}
+
+          <button
+            onClick={onGoToLibrary}
+            className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200 transition-colors text-sm"
+          >
+            <BookOpen className="w-4 h-4" />
+            Library
+          </button>
           <button
             onClick={onNewScore}
             className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200 transition-colors text-sm"

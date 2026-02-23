@@ -579,6 +579,12 @@ const MusicPartitioner = () => {
     }
   };
 
+  const handleUpdateScore = (updatedScoreId, updated) => {
+    setLibraryScores(prev =>
+      prev.map(s => s.score_id === updatedScoreId ? { ...s, ...updated } : s)
+    );
+  };
+
   // --- Page navigation ---
   const goToPage = useCallback((pageNum) => {
     if (!scoreMetadata || pageNum < 0 || pageNum >= scoreMetadata.page_count) return;
@@ -739,6 +745,20 @@ const MusicPartitioner = () => {
       detectStavesForPage(currentPage);
     }
   }, [autoDetect, phase, scoreId, pageWidth, currentPage, detectStavesForPage]);
+
+  // Force-rescan the current page: clear all detection state so the auto-detect
+  // useEffect re-triggers. Intended to be called after user confirmation.
+  const forceRescanPage = useCallback(() => {
+    const p = currentPage;
+    setDividersByPage(prev => ({ ...prev, [p]: [] }));
+    setSystemDividersByPage(prev => ({ ...prev, [p]: [] }));
+    setSnapFlagsByPage(prev => ({ ...prev, [p]: [] }));
+    setStripNamesByPage(prev => ({ ...prev, [p]: [] }));
+    setDetectionWarnings(prev => { const n = { ...prev }; delete n[p]; return n; });
+    setDetectedPages(prev => { const s = new Set(prev); s.delete(p); return s; });
+    setConfirmedPages(prev => { const s = new Set(prev); s.delete(p); return s; });
+    // Detection re-triggers automatically via the useEffect above once state is cleared
+  }, [currentPage]);
 
   // --- Divider management ---
   const addDividerAtY = (y, isSystem = false) => {
@@ -1160,6 +1180,7 @@ const MusicPartitioner = () => {
         error={libraryError}
         onRestore={handleRestoreScore}
         onDelete={handleDeleteScore}
+        onUpdate={handleUpdateScore}
         onUpload={() => setPhase('upload')}
       />
     );
@@ -1263,6 +1284,7 @@ const MusicPartitioner = () => {
               setExportResult(null);
               setError(null);
             }}
+            onGoToLibrary={handleOpenLibrary}
             onAddDivider={addDivider}
             onExport={handleExport}
             onToggleSelectHeader={() => { setIsSelectingHeader(!isSelectingHeader); setIsSelectingMarking(false); }}
@@ -1276,6 +1298,8 @@ const MusicPartitioner = () => {
             stripCount={strips.length}
             autoDetect={autoDetect}
             onToggleAutoDetect={() => setAutoDetect(prev => !prev)}
+            onForceRescan={forceRescanPage}
+            isDetecting={detectingPage === currentPage}
           />
 
           {/* Error banner */}
