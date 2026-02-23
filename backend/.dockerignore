@@ -1,0 +1,10 @@
+requirements.txt
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+storage/
+tmp/
+tests/
+.idea/
+.vscode/

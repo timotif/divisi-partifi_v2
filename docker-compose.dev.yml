@@ -1,0 +1,32 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.dev
+    volumes:
+      - ./backend:/app          # hot reload: Flask reloader watches .py files
+      - ./requirements.txt:/app/requirements.txt:ro
+    environment:
+      FLASK_DEBUG: "true"
+      CORS_ORIGINS: "http://localhost:3000"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "5000:5000"
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules       # anonymous volume: container uses its own node_modules
+    environment:
+      REACT_APP_BACKEND_URL: "http://backend:5000"
+      CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "true"
+      DANGEROUSLY_DISABLE_HOST_CHECK: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    command: sh -c "npm install && npm start"

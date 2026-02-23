@@ -18,7 +18,28 @@ Inspired by the original [partifi.org](https://partifi.org) — a tool that was 
 - **Backend**: Python, Flask, PyMuPDF, OpenCV, NumPy, SciPy
 - **Frontend**: React 19, Tailwind CSS
 
-## Development setup
+## Running with Docker (recommended)
+
+### Development (hot reload)
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
+# Frontend: http://localhost:3000
+# Backend:  http://localhost:5000
+```
+
+Source files are bind-mounted — edits to `backend/*.py` restart Flask automatically; edits to `frontend/src/` trigger a browser refresh.
+
+### Production
+
+```bash
+docker compose up --build
+# App: http://localhost:80
+```
+
+Serves the React build via nginx. API requests are proxied to gunicorn internally.
+
+## Local development setup (without Docker)
 
 ### Backend
 

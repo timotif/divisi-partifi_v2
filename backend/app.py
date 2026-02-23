@@ -15,8 +15,6 @@ from analyzer import (
 from detection.projection import detect_staves
 import db
 
-logger = logging.getLogger(__name__)
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -28,6 +26,11 @@ app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
 # In-memory session store: score_id -> { 'score': Score, 'metadata': dict, 'created_at': float }
 scores: dict[str, dict] = {}
+
+# Initialize DB and temp dir at import time so gunicorn workers pick it up
+# (gunicorn never executes the __main__ block below)
+db.init_db()
+os.makedirs(TMP_DIR, exist_ok=True)
 
 MAX_SESSIONS = 50
 SESSION_TTL_SECONDS = 3600  # 1 hour
@@ -1177,4 +1180,4 @@ def delete_score(score_id: str):
 if __name__ == '__main__':
 	db.init_db()
 	os.makedirs(TMP_DIR, exist_ok=True)
-	app.run(debug=os.getenv('FLASK_DEBUG', 'true').lower() == 'true', port=5000) # TODO: change to false in production
+	app.run(host='0.0.0.0', port=5000, debug=os.getenv('FLASK_DEBUG', 'true').lower() == 'true')

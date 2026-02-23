@@ -1,0 +1,27 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      FLASK_DEBUG: "false"
+      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
+    volumes:
+      - partifi_storage:/app/storage
+    expose:
+      - "5000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  partifi_storage:
+    name: partifi_storage

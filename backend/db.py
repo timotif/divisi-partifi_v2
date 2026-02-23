@@ -105,7 +105,7 @@ def init_db() -> None:
     os.makedirs(PARTS_DIR, exist_ok=True)
     with get_conn() as conn:
         conn.executescript(_DDL)
-    logger.info("DB initialised at %s", DB_PATH)
+    logger.info("DB initialised at %s (pid %d)", DB_PATH, os.getpid())
 
 
 # ---------------------------------------------------------------------------
