@@ -1,8 +1,20 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { Upload, BookOpen } from 'lucide-react';
+import TitleInput from './TitleInput';
+import ComposerInput from './ComposerInput';
 
 const UploadScreen = ({ onUpload, uploading, error, onOpenLibrary }) => {
   const fileInputRef = useRef(null);
+  const [title, setTitle] = useState('');
+  const [composer, setComposer] = useState('');
+  const [composerObj, setComposerObj] = useState(null); // { composer_id, displayName } | null
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!title) setTitle(file.name.replace(/\.pdf$/i, ''));
+    onUpload({ file, title: title || file.name.replace(/\.pdf$/i, ''), composerObj });
+  };
 
   return (
     <div className="p-6 bg-surface-bg min-h-screen">
@@ -10,15 +22,22 @@ const UploadScreen = ({ onUpload, uploading, error, onOpenLibrary }) => {
         <div className="bg-surface-card rounded-md shadow-sm border border-surface-border p-6">
           <h1 className="text-xl font-semibold text-gray-700 mb-8">Divisi</h1>
 
+          <div className="space-y-3 mb-6">
+            <TitleInput value={title} onChange={setTitle} />
+            <ComposerInput
+              value={composer}
+              onChange={setComposer}
+              onSelect={setComposerObj}
+            />
+          </div>
+
           <div className="border border-dashed border-surface-border rounded-md p-12 text-center">
             <input
               ref={fileInputRef}
               type="file"
               accept=".pdf"
               className="hidden"
-              onChange={(e) => {
-                if (e.target.files[0]) onUpload(e.target.files[0]);
-              }}
+              onChange={handleFileChange}
             />
             <Upload className="w-10 h-10 text-gray-300 mx-auto mb-4" />
             <p className="text-gray-500 mb-4 text-sm">Upload a PDF score to extract individual parts</p>

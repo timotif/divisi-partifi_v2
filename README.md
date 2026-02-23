@@ -66,6 +66,7 @@ npm start              # Dev server on port 3000 (proxies to backend)
 backend/
   analyzer.py          Core engine: Score, Page, Staff, Part classes + image processing
   app.py               Flask API server (upload, partition, detect, preview, generate, download)
+  db.py                SQLite persistence: scores, composers, setups, generated parts
   detection/
     projection.py      Staff detection via horizontal projection profiles + peak clustering
     hough.py           Experimental Hough transform line detection
@@ -73,8 +74,9 @@ backend/
 
 frontend/src/
   MusicPartitioner.js  Top-level state and workflow controller
+  musicMetadata.js     Static lists: nationalities, periods
   components/
-    UploadScreen.js    PDF upload
+    UploadScreen.js    PDF upload with composer and title autocomplete
     Toolbar.js         Divider tools, header/marking selection, auto-detect toggle
     ScoreCanvas.js     Page image with draggable dividers, rectangle selection, detection overlay
     StripNamesColumn.js  Editable instrument name list with auto-fill
@@ -82,6 +84,13 @@ frontend/src/
     LayoutPreview.js   Preview phase: part tabs, spacing slider
     PagePreviewArea.js Interactive A4 preview with pagination, draggable staves, page breaks
     ExportResults.js   Part download links
+    LibraryScreen.js   Saved scores and composer management
+    ComposerInput.js   Autocomplete input with inline composer creation
+    ComposerModal.js   Create/edit composer form
+    TitleInput.js      Title input with score search autocomplete
+    StaticAutocompleteInput.js  Searchable select backed by a local list
+  hooks/
+    useAutocomplete.js Reusable debounced fetch + keyboard navigation hook
 ```
 
 ## Features
@@ -99,6 +108,7 @@ Things we always wished it had:
 - **System dividers and dead zones** — shift+click marks where a new system begins; the dead space between systems is excluded and never ends up in a part
 - **Header and markings** — select the title block and tempo/dynamic markings as rectangles once; they travel automatically to every part, repositioned to avoid collisions
 - **Layout preview with per-part control** — adjust system spacing (8–16mm), drag individual staves vertically, and insert forced page breaks per part before generating anything
+- **Composer database** — composers are stored with name, dates, nationality, period, and links; autocomplete on upload, editable from the library at any time
 
 ## A note on partifi.org
 

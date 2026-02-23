@@ -408,7 +408,11 @@ const MusicPartitioner = () => {
   };
 
   // --- Upload handler ---
-  const handleUpload = async (file, forceUpload = false) => {
+  const handleUpload = async (fileOrObj, forceUpload = false) => {
+    const file        = fileOrObj?.file ?? fileOrObj;
+    const title       = fileOrObj?.title ?? '';
+    const composerObj = fileOrObj?.composerObj ?? null; // { composer_id, displayName } | null
+
     if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
       setError('Please select a PDF file.');
       return;
@@ -419,6 +423,8 @@ const MusicPartitioner = () => {
 
     const formData = new FormData();
     formData.append('file', file);
+    if (title) formData.append('title', title);
+    // composer text is no longer sent; link is made via the composers endpoint below
 
     const url = forceUpload ? '/api/upload?force=1' : '/api/upload';
 
@@ -442,6 +448,16 @@ const MusicPartitioner = () => {
       }
 
       const data = await response.json();
+
+      // Link the selected/created composer (non-fatal if it fails)
+      if (composerObj?.composer_id) {
+        fetch(`/api/scores/${data.score_id}/composers`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ composer_id: composerObj.composer_id }),
+        }).catch(err => console.warn('Composer link failed:', err));
+      }
+
       setScoreId(data.score_id);
       setScoreMetadata({ page_count: data.page_count, pages: data.pages });
       setCurrentPage(0);

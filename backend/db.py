@@ -20,6 +20,7 @@ import os
 import shutil
 import sqlite3
 import time
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,29 @@ CREATE TABLE IF NOT EXISTS generated_parts (
     staves_count    INTEGER NOT NULL,
     generated_at    REAL NOT NULL,
     PRIMARY KEY (score_id, part_name)
+);
+
+CREATE TABLE IF NOT EXISTS composers (
+    composer_id   TEXT PRIMARY KEY,
+    surname       TEXT NOT NULL,
+    name          TEXT NOT NULL DEFAULT '',
+    nationality   TEXT NOT NULL DEFAULT '',
+    dob           TEXT,
+    dod           TEXT,
+    gender        TEXT,
+    period        TEXT,
+    imslp_url     TEXT,
+    wikipedia_url TEXT,
+    notes         TEXT,
+    created_at    REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS score_composers (
+    score_id      TEXT NOT NULL REFERENCES scores(score_id) ON DELETE CASCADE,
+    composer_id   TEXT NOT NULL REFERENCES composers(composer_id) ON DELETE RESTRICT,
+    role          TEXT NOT NULL DEFAULT 'composer',
+    sort_order    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (score_id, composer_id)
 );
 """
 
@@ -328,3 +352,166 @@ def invalidate_generated_parts(score_id: str) -> None:
 def sha256_of_bytes(data: bytes) -> str:
     """Return the hex SHA-256 digest of *data*."""
     return hashlib.sha256(data).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# composers table
+# ---------------------------------------------------------------------------
+
+def insert_composer(
+    surname: str,
+    name: str = '',
+    nationality: str = '',
+    dob: str | None = None,
+    dod: str | None = None,
+    gender: str | None = None,
+    period: str | None = None,
+    imslp_url: str | None = None,
+    wikipedia_url: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Insert a new composer row and return the generated UUID."""
+    composer_id = str(uuid.uuid4())
+    now = time.time()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO composers
+                (composer_id, surname, name, nationality, dob, dod, gender,
+                 period, imslp_url, wikipedia_url, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (composer_id, surname, name, nationality, dob, dod, gender,
+             period, imslp_url, wikipedia_url, notes, now),
+        )
+    return composer_id
+
+
+def search_scores(query: str) -> list[sqlite3.Row]:
+    """Return scores whose title contains *query* (case-insensitive).
+
+    Returns at most 10 results ordered by updated_at descending.
+    """
+    pattern = f"%{query}%"
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT score_id, title
+            FROM scores
+            WHERE title LIKE ?
+            ORDER BY updated_at DESC
+            LIMIT 10
+            """,
+            (pattern,),
+        ).fetchall()
+
+
+def update_composer(composer_id: str, **fields) -> bool:
+    """Update any subset of composer fields.
+
+    Only keys present in *fields* are written; unknown keys are silently ignored.
+    Returns True if a row was updated, False if composer_id was not found.
+    """
+    _allowed = {
+        'surname', 'name', 'nationality', 'dob', 'dod',
+        'gender', 'period', 'imslp_url', 'wikipedia_url', 'notes',
+    }
+    updates = {k: v for k, v in fields.items() if k in _allowed}
+    if not updates:
+        return False
+    cols = ', '.join(f"{k} = ?" for k in updates)
+    vals = list(updates.values()) + [composer_id]
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"UPDATE composers SET {cols} WHERE composer_id = ?", vals
+        )
+        return cur.rowcount > 0
+
+
+def search_composers(query: str) -> list[sqlite3.Row]:
+    """Return composers whose surname or name contains *query* (case-insensitive).
+
+    The user-supplied value is bound as a parameterised ``?`` — no SQL injection risk.
+    Returns at most 20 results ordered by surname then name.
+    """
+    pattern = f"%{query}%"
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT composer_id, surname, name, nationality, period,
+                   dob, dod, gender, imslp_url, wikipedia_url, notes
+            FROM composers
+            WHERE surname LIKE ? OR name LIKE ?
+            ORDER BY surname, name
+            LIMIT 20
+            """,
+            (pattern, pattern),
+        ).fetchall()
+
+
+def get_all_composers() -> list[sqlite3.Row]:
+    """Return all composers ordered by surname then name."""
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT composer_id, surname, name, nationality, period,
+                   dob, dod, gender, imslp_url, wikipedia_url, notes
+            FROM composers
+            ORDER BY surname, name
+            """
+        ).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# score_composers join table
+# ---------------------------------------------------------------------------
+
+def link_score_composer(
+    score_id: str,
+    composer_id: str,
+    role: str = 'composer',
+    sort_order: int = 0,
+) -> None:
+    """Insert or update a score–composer link.
+
+    Uses ``ON CONFLICT DO UPDATE`` so calling this twice is idempotent.
+    Raises ``sqlite3.IntegrityError`` if either FK target does not exist.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO score_composers (score_id, composer_id, role, sort_order)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(score_id, composer_id) DO UPDATE SET
+                role       = excluded.role,
+                sort_order = excluded.sort_order
+            """,
+            (score_id, composer_id, role, sort_order),
+        )
+
+
+def get_score_composers(score_id: str) -> list[sqlite3.Row]:
+    """Return all composers linked to a score, ordered by sort_order."""
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT c.composer_id, c.surname, c.name, c.nationality, c.period,
+                   c.dob, c.dod, c.gender, c.imslp_url, c.wikipedia_url, c.notes,
+                   sc.role, sc.sort_order
+            FROM score_composers sc
+            JOIN composers c ON c.composer_id = sc.composer_id
+            WHERE sc.score_id = ?
+            ORDER BY sc.sort_order, c.surname
+            """,
+            (score_id,),
+        ).fetchall()
+
+
+def unlink_score_composer(score_id: str, composer_id: str) -> bool:
+    """Remove a score–composer link.  Returns True if a row was deleted."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM score_composers WHERE score_id = ? AND composer_id = ?",
+            (score_id, composer_id),
+        )
+        return cur.rowcount > 0

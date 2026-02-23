@@ -523,3 +523,249 @@ class TestSha256OfBytes:
         assert isinstance(result, str)
         assert len(result) == 64
         assert all(c in "0123456789abcdef" for c in result)
+
+
+# ---------------------------------------------------------------------------
+# composers table
+# ---------------------------------------------------------------------------
+
+class TestComposers:
+    # --- insert / get_all / search ---
+
+    def test_insert_returns_uuid(self):
+        cid = dbmod.insert_composer("Brahms", name="Johannes")
+        assert isinstance(cid, str)
+        assert len(cid) == 36  # UUID4 canonical form
+
+    def test_get_all_returns_inserted(self):
+        dbmod.insert_composer("Bach", name="Johann Sebastian")
+        rows = dbmod.get_all_composers()
+        surnames = [r["surname"] for r in rows]
+        assert "Bach" in surnames
+
+    def test_get_all_ordered_by_surname(self):
+        dbmod.insert_composer("Verdi")
+        dbmod.insert_composer("Brahms")
+        dbmod.insert_composer("Bach")
+        rows = dbmod.get_all_composers()
+        surnames = [r["surname"] for r in rows]
+        assert surnames == sorted(surnames)
+
+    def test_get_all_empty_when_none(self):
+        assert dbmod.get_all_composers() == []
+
+    def test_search_by_surname(self):
+        dbmod.insert_composer("Beethoven", name="Ludwig van")
+        results = dbmod.search_composers("Beet")
+        assert any(r["surname"] == "Beethoven" for r in results)
+
+    def test_search_by_given_name(self):
+        dbmod.insert_composer("Debussy", name="Claude")
+        results = dbmod.search_composers("Clau")
+        assert any(r["surname"] == "Debussy" for r in results)
+
+    def test_search_case_insensitive(self):
+        dbmod.insert_composer("Chopin", name="Frédéric")
+        results = dbmod.search_composers("chopin")
+        assert any(r["surname"] == "Chopin" for r in results)
+
+    def test_search_no_match_returns_empty(self):
+        dbmod.insert_composer("Mozart")
+        assert dbmod.search_composers("zzznomatch") == []
+
+    def test_search_max_20_results(self):
+        for i in range(25):
+            dbmod.insert_composer(f"Surname{i:02d}")
+        results = dbmod.search_composers("Surname")
+        assert len(results) <= 20
+
+    def test_insert_optional_fields_default(self):
+        cid = dbmod.insert_composer("Handel")
+        rows = dbmod.get_all_composers()
+        row = next(r for r in rows if r["surname"] == "Handel")
+        assert row["name"] == ""
+        assert row["nationality"] == ""
+
+    def test_insert_with_all_fields(self):
+        cid = dbmod.insert_composer(
+            surname="Vivaldi",
+            name="Antonio",
+            nationality="Italian",
+            dob="1678",
+            dod="1741",
+            gender="M",
+            period="Baroque",
+        )
+        assert cid is not None
+
+    # --- link / get_score_composers / unlink ---
+
+    def test_link_and_get(self):
+        _insert()
+        cid = dbmod.insert_composer("Schubert", name="Franz")
+        dbmod.link_score_composer(SCORE_ID, cid)
+        rows = dbmod.get_score_composers(SCORE_ID)
+        assert len(rows) == 1
+        assert rows[0]["surname"] == "Schubert"
+        assert rows[0]["role"] == "composer"
+
+    def test_link_with_role_and_sort_order(self):
+        _insert()
+        cid = dbmod.insert_composer("Liszt", name="Franz")
+        dbmod.link_score_composer(SCORE_ID, cid, role="arranger", sort_order=2)
+        rows = dbmod.get_score_composers(SCORE_ID)
+        assert rows[0]["role"] == "arranger"
+        assert rows[0]["sort_order"] == 2
+
+    def test_link_idempotent_upsert(self):
+        _insert()
+        cid = dbmod.insert_composer("Wagner")
+        dbmod.link_score_composer(SCORE_ID, cid, role="composer", sort_order=0)
+        dbmod.link_score_composer(SCORE_ID, cid, role="arranger", sort_order=1)
+        rows = dbmod.get_score_composers(SCORE_ID)
+        assert len(rows) == 1
+        assert rows[0]["role"] == "arranger"
+        assert rows[0]["sort_order"] == 1
+
+    def test_get_score_composers_ordered_by_sort_order(self):
+        _insert()
+        c1 = dbmod.insert_composer("Ravel")
+        c2 = dbmod.insert_composer("Debussy")
+        dbmod.link_score_composer(SCORE_ID, c1, sort_order=1)
+        dbmod.link_score_composer(SCORE_ID, c2, sort_order=0)
+        rows = dbmod.get_score_composers(SCORE_ID)
+        assert rows[0]["surname"] == "Debussy"
+        assert rows[1]["surname"] == "Ravel"
+
+    def test_get_score_composers_empty(self):
+        _insert()
+        assert dbmod.get_score_composers(SCORE_ID) == []
+
+    def test_unlink_returns_true(self):
+        _insert()
+        cid = dbmod.insert_composer("Sibelius")
+        dbmod.link_score_composer(SCORE_ID, cid)
+        assert dbmod.unlink_score_composer(SCORE_ID, cid) is True
+        assert dbmod.get_score_composers(SCORE_ID) == []
+
+    def test_unlink_nonexistent_returns_false(self):
+        _insert()
+        cid = dbmod.insert_composer("Grieg")
+        # Never linked
+        assert dbmod.unlink_score_composer(SCORE_ID, cid) is False
+
+    # --- FK constraints ---
+
+    def test_fk_cascade_on_score_delete(self):
+        """Deleting a score must cascade-delete its score_composers rows."""
+        _insert()
+        cid = dbmod.insert_composer("Mahler")
+        dbmod.link_score_composer(SCORE_ID, cid)
+        dbmod.delete_score(SCORE_ID)
+        # score_composers row should be gone; composer row should survive
+        all_composers = dbmod.get_all_composers()
+        assert any(r["surname"] == "Mahler" for r in all_composers)
+
+    def test_fk_restrict_on_composer_delete_with_active_link(self):
+        """Deleting a composer that is still linked to a score must raise IntegrityError."""
+        _insert()
+        cid = dbmod.insert_composer("Bruckner")
+        dbmod.link_score_composer(SCORE_ID, cid)
+        with dbmod.get_conn() as conn:
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(
+                    "DELETE FROM composers WHERE composer_id = ?", (cid,)
+                )
+
+    # --- update_composer ---
+
+    def test_update_single_field(self):
+        cid = dbmod.insert_composer("Handel")
+        assert dbmod.update_composer(cid, nationality="German-British") is True
+        rows = dbmod.get_all_composers()
+        row = next(r for r in rows if r["surname"] == "Handel")
+        assert row["nationality"] == "German-British"
+
+    def test_update_multiple_fields(self):
+        cid = dbmod.insert_composer("Vivaldi")
+        dbmod.update_composer(cid, name="Antonio", period="Baroque", dob="1678")
+        rows = dbmod.get_all_composers()
+        row = next(r for r in rows if r["surname"] == "Vivaldi")
+        assert row["name"] == "Antonio"
+        assert row["period"] == "Baroque"
+
+    def test_update_unknown_fields_ignored(self):
+        cid = dbmod.insert_composer("Bach")
+        # Should not raise, unknown key silently dropped
+        result = dbmod.update_composer(cid, nonexistent_field="x")
+        assert result is False  # no valid fields → no update
+
+    def test_update_nonexistent_composer_returns_false(self):
+        assert dbmod.update_composer("no-such-id", name="X") is False
+
+    def test_tables_include_composers(self):
+        with dbmod.get_conn() as conn:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        assert "composers" in tables
+        assert "score_composers" in tables
+
+    # --- dob/dod round-trip through all query paths ---
+
+    def test_insert_dob_dod_persisted(self):
+        """dob and dod are stored and retrievable via get_all_composers."""
+        cid = dbmod.insert_composer("Brahms", "Johannes", dob="1833", dod="1897")
+        rows = dbmod.get_all_composers()
+        row = next(r for r in rows if r["composer_id"] == cid)
+        assert row["dob"] == "1833"
+        assert row["dod"] == "1897"
+
+    def test_search_composers_returns_dob_dod(self):
+        """search_composers includes dob/dod in each result row."""
+        cid = dbmod.insert_composer("Schubert", "Franz", dob="1797", dod="1828")
+        rows = dbmod.search_composers("Schubert")
+        row = next(r for r in rows if r["composer_id"] == cid)
+        assert row["dob"] == "1797"
+        assert row["dod"] == "1828"
+
+    def test_update_dob_dod_persisted(self):
+        """update_composer correctly writes dob and dod to the database."""
+        cid = dbmod.insert_composer("Beethoven")
+        dbmod.update_composer(cid, dob="1770", dod="1827")
+        rows = dbmod.get_all_composers()
+        row = next(r for r in rows if r["composer_id"] == cid)
+        assert row["dob"] == "1770"
+        assert row["dod"] == "1827"
+
+    def test_get_score_composers_returns_dob_dod(self):
+        """get_score_composers includes dob/dod from the composers JOIN."""
+        _insert()
+        cid = dbmod.insert_composer("Haydn", "Joseph", dob="1732", dod="1809")
+        dbmod.link_score_composer(SCORE_ID, cid)
+        rows = dbmod.get_score_composers(SCORE_ID)
+        assert len(rows) == 1
+        assert rows[0]["dob"] == "1732"
+        assert rows[0]["dod"] == "1809"
+
+    def test_get_all_composers_returns_full_fields(self):
+        """get_all_composers exposes all editable fields, not just name/period."""
+        cid = dbmod.insert_composer(
+            "Purcell", "Henry",
+            nationality="English", period="Baroque",
+            dob="1659", dod="1695",
+            gender="M", imslp_url="https://imslp.org/purcell",
+            wikipedia_url="https://en.wikipedia.org/wiki/Henry_Purcell",
+            notes="Baroque master",
+        )
+        rows = dbmod.get_all_composers()
+        row = next(r for r in rows if r["composer_id"] == cid)
+        assert row["dob"] == "1659"
+        assert row["dod"] == "1695"
+        assert row["gender"] == "M"
+        assert row["imslp_url"] == "https://imslp.org/purcell"
+        assert row["wikipedia_url"] == "https://en.wikipedia.org/wiki/Henry_Purcell"
+        assert row["notes"] == "Baroque master"

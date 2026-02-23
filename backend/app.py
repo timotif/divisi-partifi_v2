@@ -1109,6 +1109,231 @@ def delete_setup_version(score_id: str, version_name: str):
 	return jsonify({"deleted": True})
 
 
+# --- Score search ---
+
+@app.route('/api/scores/search', methods=['GET'])
+def search_scores():
+    """Search existing score titles.
+
+    Query param: ?q=<fragment>  — substring match on title (min 2 chars).
+
+    Response: { "scores": [{ "score_id", "title" }, ...] }
+    """
+    q = sanitize_string(request.args.get('q', ''))
+    if len(q) < 2:
+        return jsonify({"scores": []})
+    rows = db.search_scores(q)
+    return jsonify({"scores": [{"score_id": r["score_id"], "title": r["title"]} for r in rows]})
+
+
+# --- Composer endpoints ---
+
+_VALID_ROLES   = {'composer', 'arranger', 'editor'}
+_VALID_GENDERS = {'M', 'F', 'other'}
+
+
+@app.route('/api/composers', methods=['GET'])
+def list_composers():
+    """Search or list all composers.
+
+    Query param: ?q=<fragment>  — substring match on surname/name.
+    Omit q (or leave empty) to return every composer.
+
+    Response: { "composers": [{composer_id, surname, name, nationality, period}, ...] }
+    """
+    q = sanitize_string(request.args.get('q', ''))
+    if q:
+        rows = db.search_composers(q)
+    else:
+        rows = db.get_all_composers()
+    return jsonify({
+        "composers": [
+            {
+                "composer_id":  r["composer_id"],
+                "surname":      r["surname"],
+                "name":         r["name"],
+                "nationality":  r["nationality"],
+                "period":       r["period"],
+                "dob":          r["dob"],
+                "dod":          r["dod"],
+                "gender":       r["gender"],
+                "imslp_url":    r["imslp_url"],
+                "wikipedia_url": r["wikipedia_url"],
+                "notes":        r["notes"],
+            }
+            for r in rows
+        ]
+    })
+
+
+@app.route('/api/composers', methods=['POST'])
+def create_composer():
+    """Create a new composer.
+
+    Request JSON:
+    {
+      "surname": "Brahms",
+      "name": "Johannes",          // optional
+      "nationality": "German",     // optional
+      "dob": "1833", "dod": "1897",// optional
+      "gender": "M",               // optional, must be M/F/other
+      "period": "Romantic",        // optional
+      "imslp_url": "...",          // optional
+      "wikipedia_url": "...",      // optional
+      "notes": "..."               // optional
+    }
+
+    Response 201: { composer_id, surname, name, nationality, period }
+    """
+    data = request.get_json()
+    if not data:
+        abort(400, description="Missing request body")
+
+    surname = sanitize_string(data.get('surname') or '')
+    if not surname:
+        abort(400, description="'surname' is required")
+
+    name         = sanitize_string(data.get('name') or '')
+    nationality  = sanitize_string(data.get('nationality') or '')
+    dob          = sanitize_string(data.get('dob') or '') or None
+    dod          = sanitize_string(data.get('dod') or '') or None
+    period       = sanitize_string(data.get('period') or '') or None
+    imslp_url    = sanitize_string(data.get('imslp_url') or '') or None
+    wikipedia_url = sanitize_string(data.get('wikipedia_url') or '') or None
+    notes        = sanitize_string(data.get('notes') or '') or None
+
+    raw_gender = data.get('gender')
+    gender = raw_gender if raw_gender in _VALID_GENDERS else None
+
+    composer_id = db.insert_composer(
+        surname=surname,
+        name=name,
+        nationality=nationality,
+        dob=dob,
+        dod=dod,
+        gender=gender,
+        period=period,
+        imslp_url=imslp_url,
+        wikipedia_url=wikipedia_url,
+        notes=notes,
+    )
+
+    return jsonify({
+        "composer_id": composer_id,
+        "surname":     surname,
+        "name":        name,
+        "nationality": nationality,
+        "period":      period,
+    }), 201
+
+
+@app.route('/api/composers/<composer_id>', methods=['PATCH'])
+def update_composer(composer_id: str):
+    """Update any subset of fields on an existing composer.
+
+    Request JSON: any subset of
+      { surname, name, nationality, dob, dod, gender, period,
+        imslp_url, wikipedia_url, notes }
+
+    Response 200: { updated: true }
+    Response 404: composer not found
+    """
+    composer_id = sanitize_string(composer_id)
+    if not composer_id:
+        abort(400, description="Invalid composer ID")
+
+    data = request.get_json()
+    if not data:
+        abort(400, description="Missing request body")
+
+    _updatable = {
+        'surname', 'name', 'nationality', 'dob', 'dod',
+        'period', 'imslp_url', 'wikipedia_url', 'notes',
+    }
+    fields = {}
+    for key in _updatable:
+        if key in data:
+            fields[key] = sanitize_string(data[key] or '') or None if key not in ('surname', 'name', 'nationality') else sanitize_string(data[key] or '')
+
+    if 'gender' in data:
+        fields['gender'] = data['gender'] if data['gender'] in _VALID_GENDERS else None
+
+    # surname must not be blanked out
+    if 'surname' in fields and not fields['surname']:
+        abort(400, description="'surname' cannot be empty")
+
+    updated = db.update_composer(composer_id, **fields)
+    if not updated:
+        abort(404, description="Composer not found")
+
+    return jsonify({"updated": True})
+
+
+@app.route('/api/scores/<score_id>/composers', methods=['GET'])
+def get_score_composers(score_id: str):
+    """Return all composers linked to a score.
+
+    Response: { "composers": [{composer_id, surname, name, nationality, period, role, sort_order}, ...] }
+    """
+    _validate_score_id(score_id)
+    rows = db.get_score_composers(score_id)
+    return jsonify({
+        "composers": [
+            {
+                "composer_id":  r["composer_id"],
+                "surname":      r["surname"],
+                "name":         r["name"],
+                "nationality":  r["nationality"],
+                "period":       r["period"],
+                "dob":          r["dob"],
+                "dod":          r["dod"],
+                "gender":       r["gender"],
+                "imslp_url":    r["imslp_url"],
+                "wikipedia_url": r["wikipedia_url"],
+                "notes":        r["notes"],
+                "role":         r["role"],
+                "sort_order":   r["sort_order"],
+            }
+            for r in rows
+        ]
+    })
+
+
+@app.route('/api/scores/<score_id>/composers', methods=['POST'])
+def link_score_composer(score_id: str):
+    """Link an existing composer to a score.
+
+    Request JSON:
+    {
+      "composer_id": "<uuid>",
+      "role": "composer",    // optional, default "composer"
+      "sort_order": 0        // optional, default 0
+    }
+
+    Response 201: { "linked": true }
+    Response 409: FK violation (composer_id does not exist)
+    """
+    _validate_score_id(score_id)
+
+    data = request.get_json()
+    if not data or not data.get('composer_id'):
+        abort(400, description="'composer_id' is required")
+
+    composer_id = sanitize_string(data['composer_id'])
+    role = data.get('role', 'composer')
+    if role not in _VALID_ROLES:
+        role = 'composer'
+    sort_order = int(data.get('sort_order', 0))
+
+    import sqlite3 as _sqlite3
+    try:
+        db.link_score_composer(score_id, composer_id, role=role, sort_order=sort_order)
+    except _sqlite3.IntegrityError:
+        abort(409, description="composer_id does not exist")
+
+    return jsonify({"linked": True}), 201
+
+
 # --- Library endpoints ---
 
 @app.route('/api/library', methods=['GET'])
@@ -1132,10 +1357,28 @@ def list_library():
 	for row in rows:
 		versions = db.list_setups(row["score_id"])
 		gen_parts = db.get_generated_parts(row["score_id"])
+		composers = db.get_score_composers(row["score_id"])
 		result.append({
 			"score_id":       row["score_id"],
 			"title":          row["title"],
-			"composer":       row["composer"],
+			"composer":       row["composer"],  # legacy fallback
+			"composers": [
+				{
+					"composer_id":  c["composer_id"],
+					"surname":      c["surname"],
+					"name":         c["name"],
+					"nationality":  c["nationality"],
+					"period":       c["period"],
+					"dob":          c["dob"],
+					"dod":          c["dod"],
+					"gender":       c["gender"],
+					"imslp_url":    c["imslp_url"],
+					"wikipedia_url": c["wikipedia_url"],
+					"notes":        c["notes"],
+					"role":         c["role"],
+				}
+				for c in composers
+			],
 			"page_count":     row["page_count"],
 			"created_at":     row["created_at"],
 			"updated_at":     row["updated_at"],
