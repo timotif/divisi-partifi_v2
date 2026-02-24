@@ -7,7 +7,7 @@ Inspired by the original [partifi.org](https://partifi.org) — a tool that was 
 ## How it works
 
 1. **Upload** a PDF score. The backend extracts each page as a high-resolution image.
-2. **Auto-detect staves** — Divisi analyzes each page using horizontal projection profiles and automatically places dividers between staves, grouping them into systems. You can adjust, add, or remove any divider. Toggle auto-detection off to place dividers manually.
+2. **Auto-detect staves** — Divisi analyzes each page in four phases: it segments the page into system bands using vertical ink signal in the left margin, detects staves within each band via horizontal projection, confirms system boundaries using barline runs, and scores confidence. Dividers are placed automatically; you can adjust, add, or remove any of them. Toggle auto-detection off to place dividers manually.
 3. **Name instruments** — type part names once and auto-fill handles the rest, cycling through the sequence across systems and pages.
 4. **Select header and markings** (title block, tempo markings) as rectangle regions. These get attached to each part automatically.
 5. **Preview the layout** before exporting. Adjust system spacing, drag individual staves, and insert page breaks. Changes update in real time.
@@ -68,9 +68,11 @@ backend/
   app.py               Flask API server (upload, partition, detect, preview, generate, download)
   db.py                SQLite persistence: scores, composers, setups, generated parts
   detection/
-    projection.py      Staff detection via horizontal projection profiles + peak clustering
+    projection.py      Staff detection pipeline: system band segmentation, stave detection,
+                       barline confirmation, system assembly, confidence scoring
     hough.py           Experimental Hough transform line detection
     pdf.py             Shared PDF page extraction utility
+    detection_flow.md  Mermaid diagram of the full detection pipeline
 
 frontend/src/
   MusicPartitioner.js  Top-level state and workflow controller
@@ -98,7 +100,7 @@ frontend/src/
 Everything partifi.org did:
 
 - **Upload a PDF score** and extract individual instrument parts
-- **Automatic staff detection** — staves are detected automatically; you can adjust, add, or remove any divider
+- **Automatic staff detection** — a four-phase pipeline segments the page into system bands (via vertical barline signal in the left margin), detects staves within each band, confirms system boundaries using barline runs, and produces a confidence score. Dividers are placed automatically; you can adjust, add, or remove any of them.
 - **Auto-fill naming** — name the instruments once in the first system; subsequent staves and pages fill in automatically
 - **Persistent library** — uploaded scores and their layouts are saved to disk; come back later and pick up where you left off
 - **Free** — no account, no subscription, no strings attached
