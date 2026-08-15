@@ -109,6 +109,10 @@ CLAUDE.md
 .windsurf/
 takeaways.md
 
+# Agent scratchpad: handoffs, plans, session notes, throwaway scripts.
+# Lives in the repo for convenience but is never committed.
+scratchpad/
+
 # Archives
 *.7z
 *.dmg
