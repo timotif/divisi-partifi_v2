@@ -19,9 +19,11 @@ flowchart TD
         A6 --> B1
         B1 --> B2[find_staff_line_peaks]
         B2 --> B3[cluster_into_staves]
-        B3 --> B4[_squint_rescue]
+        B3 --> B4[_squint_rescue: blur, then require a staff-width ink row]
         B4 --> B5[offset Y back to page space]
-        B5 --> B6[(all_staves)]
+        B5 --> B5a[_merge_abutting_staves: collapse candidates too close to be separate]
+        B5a --> B5b[_reject_misshapen_staves: drop oversized blobs lacking staff lines]
+        B5b --> B6[(all_staves)]
     end
 
     subgraph PHASE_C [Phase C — System assembly]
@@ -30,9 +32,12 @@ flowchart TD
         C1 --> C2{stave balance check passes?}
         C2 -- yes --> C3[per-system barline confirmation: find_barline_x + _find_fine_barline_x + detect_system_barlines]
         C3 --> C4[(systems + barline_info)]
-        C2 -- no --> C5[cluster_into_systems fallback: barline runs or gap heuristic]
+        C2 -- no --> C5[cluster_into_systems]
         A6 --> C5
-        C5 --> C4
+        C5 --> C5a[_cluster_by_bridges: does any column bridge the gap between two staves?]
+        C5a -- no result --> C5b[fallback: page-global barline runs, then gap heuristic]
+        C5a --> C4
+        C5b --> C4
     end
 
     subgraph CONFIDENCE [Phase D — Confidence scoring]
