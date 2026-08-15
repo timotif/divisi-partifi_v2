@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import UploadScreen from './components/UploadScreen';
 import ExportResults from './components/ExportResults';
 import PageNavigation from './components/PageNavigation';
@@ -10,6 +10,7 @@ import LayoutPreview from './components/LayoutPreview';
 import LibraryScreen from './components/LibraryScreen';
 import { isPageInRange as isInRange, updateRange } from './utils/scoreRange';
 import { pickMostCommonSequence, fillNames } from './utils/knownSequence';
+import { buildNameCandidates } from './utils/stripNameSuggest';
 
 const STRIP_COLUMN_WIDTH = 160;
 const ANNOTATIONS_PANEL_WIDTH = 176; // w-44 = 11rem = 176px
@@ -50,6 +51,9 @@ const MusicPartitioner = () => {
 
   // --- Per-page strip names ---
   const [stripNamesByPage, setStripNamesByPage] = useState({});
+
+  // --- Per-page OCR-suggested strip names (backend detect field, may be absent) ---
+  const [suggestedNamesByPage, setSuggestedNamesByPage] = useState({});
 
   // --- Export results ---
   const [exportResult, setExportResult] = useState(null);
@@ -196,6 +200,13 @@ const MusicPartitioner = () => {
   const currentStripNames = stripNamesByPage[currentPage] || [];
   const currentSystemDividers = systemDividersByPage[currentPage] || [];
   const currentSnapFlags = snapFlagsByPage[currentPage] || [];
+  const currentSuggestedNames = suggestedNamesByPage[currentPage] || [];
+
+  // Every distinct name typed anywhere in this score, for ghost-text autocomplete.
+  const nameCandidates = useMemo(
+    () => buildNameCandidates(stripNamesByPage),
+    [stripNamesByPage]
+  );
 
   // --- Strips computation ---
   const getStrips = useCallback(() => {
@@ -768,6 +779,8 @@ const MusicPartitioner = () => {
         }
         return { ...prev, [pageNum]: data.strip_names };
       });
+      // OCR-suggested names: backend field may not exist yet.
+      setSuggestedNamesByPage(prev => ({ ...prev, [pageNum]: data.suggested_names || [] }));
 
       // Mark as detected but NOT confirmed — user must review
       setDetectedPages(prev => new Set(prev).add(pageNum));
@@ -1464,6 +1477,8 @@ const MusicPartitioner = () => {
               pageHeight={pageHeight}
               onUpdateName={updateStripName}
               onBlurName={handleStripNameBlur}
+              nameCandidates={nameCandidates}
+              suggestedNames={currentSuggestedNames}
             />
 
             {/* Sheet music */}
