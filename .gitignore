@@ -128,3 +128,5 @@ backend/requirements.txt
 *.rar
 *.tar
 *.zip
+# Design/brainstorming docs: local working notes, not part of the repo
+docs/design/
