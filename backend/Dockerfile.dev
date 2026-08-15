@@ -2,6 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# tesseract-ocr: instrument-label OCR (detection/labels.py). eng comes with the
+# base package; ita is added explicitly since labels.py OCRs with -l ita+eng.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	tesseract-ocr tesseract-ocr-ita \
+	&& rm -rf /var/lib/apt/lists/*
+
 # requirements.txt is at project root; compose sets build context to project root
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

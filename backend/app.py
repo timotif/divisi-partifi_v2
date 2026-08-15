@@ -244,6 +244,36 @@ def serve_page(score_id: str, page_num: int):
 	return send_file(io.BytesIO(png_bytes), mimetype='image/png')
 
 
+def _flatten_suggested_names(systems: list, labels_by_system: list, n_strips: int) -> list[str]:
+	"""Flatten detect_instrument_labels()'s per-system output to strip order.
+
+	staves_to_dividers() emits, per system, one top-boundary divider, one
+	between-stave divider per gap, and one bottom-boundary divider — so each
+	system contributes len(system) real strip-gaps (one per stave) followed
+	by a dead-space gap before the next system's top boundary. This walks
+	systems in that same order and drops '' into each dead gap.
+
+	Misalignment here means a name lands on the wrong stave — the exact
+	catastrophic failure this feature must never risk — so ANY shape mismatch
+	falls back to an all-blank array rather than guessing.
+	"""
+	if len(systems) != len(labels_by_system):
+		return [''] * n_strips
+
+	flat: list[str] = []
+	for sys_idx, system in enumerate(systems):
+		labels = labels_by_system[sys_idx]
+		if len(labels) != len(system):
+			return [''] * n_strips
+		flat.extend(labels)
+		if sys_idx < len(systems) - 1:
+			flat.append('')  # dead-space gap before next system's top boundary
+
+	if len(flat) != n_strips:
+		return [''] * n_strips
+	return flat
+
+
 @app.route('/api/scores/<score_id>/pages/<int:page_num>/detect', methods=['POST'])
 def detect_page_staves(score_id: str, page_num: int):
 	"""Run staff detection on a page and return tentative divider positions.
@@ -272,10 +302,11 @@ def detect_page_staves(score_id: str, page_num: int):
 			"dividers": cached["dividers"],
 			"system_flags": cached["system_flags"],
 			"snap_flags": cached.get("snap_flags", []),
+			"suggested_names": cached.get("suggested_names", []),
 		})
 
 	page_img = score.pages[page_num].img
-	img_height = page_img.shape[0]
+	img_height, img_width = page_img.shape[:2]
 
 	try:
 		result = detect_staves(page_img)
@@ -288,10 +319,26 @@ def detect_page_staves(score_id: str, page_num: int):
 	confidence = result["confidence"]
 	reasons = result["reasons"]
 	projection = result["projection"]
+	barline_info = result.get("barline_info")
 
 	dividers, sys_flags, snap_flags = staves_to_dividers(
 		systems, img_height, projection
 	)
+
+	# OCR is best-effort: it must never break staff detection. Any failure
+	# (tesseract missing, unexpected shape, OCR exception) falls back to an
+	# all-blank array so the rest of the response is unaffected.
+	n_strips = max(0, len(dividers) - 1)
+	suggested_names = [''] * n_strips
+	try:
+		labels_by_system = detect_instrument_labels(
+			page_img, systems, img_width, img_height, barline_info
+		)
+		if labels_by_system:
+			suggested_names = _flatten_suggested_names(systems, labels_by_system, n_strips)
+	except Exception:
+		logger.exception("Instrument label OCR failed for page %d", page_num)
+		suggested_names = [''] * n_strips
 
 	cache[page_num] = {
 		"confidence": confidence,
@@ -301,6 +348,7 @@ def detect_page_staves(score_id: str, page_num: int):
 		"dividers": dividers,
 		"system_flags": sys_flags,
 		"snap_flags": snap_flags,
+		"suggested_names": suggested_names,
 	}
 
 	return jsonify({
@@ -311,6 +359,7 @@ def detect_page_staves(score_id: str, page_num: int):
 		"dividers": dividers,
 		"system_flags": sys_flags,
 		"snap_flags": snap_flags,
+		"suggested_names": suggested_names,
 	})
 
 
