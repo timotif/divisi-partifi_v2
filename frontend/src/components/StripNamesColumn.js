@@ -85,6 +85,10 @@ const StripNamesColumn = ({ strips, stripNames, sequence, pageHeight, onUpdateNa
                     acceptGhost(index, ghost);
                   }
                 }}
+                // Instrument names are not dictionary words; the browser's red
+                // squiggles under every field are noise.
+                spellCheck="false"
+                autoComplete="off"
                 className={`relative bg-transparent text-white outline-none ${FIELD_TEXT}`}
                 style={{ cursor: 'text' }}
                 onClick={(e) => e.stopPropagation()}
