@@ -88,4 +88,12 @@ describe('fillNames', () => {
     expect(fillNames(['a'], strips(true), [])).toEqual(['a']);
     expect(fillNames([], [], SEQ)).toEqual([]);
   });
+
+  // A page seeded from another page can arrive with a single name already on
+  // it (auto-fill or an accepted ghost). Seeding used to skip any page with a
+  // name, leaving the other strips blank forever.
+  test('completes a page that only has its first strip named', () => {
+    const s = strips(true, false, false, true, false, false);
+    expect(fillNames(['Vl1'], s, SEQ)).toEqual(['Vl1', 'Vl2', 'Vla', 'Vl1', 'Vl2', 'Vla']);
+  });
 });

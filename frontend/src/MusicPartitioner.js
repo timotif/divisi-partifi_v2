@@ -1111,23 +1111,29 @@ const MusicPartitioner = () => {
       // no matter how many are detected. The first page the user names is what
       // makes a sequence exist, so that is the moment to propagate it.
       //
-      // Only untouched pages are filled: a page with any name on it is either
-      // already done or deliberately different, and must not be overwritten.
+      // Existing names are preserved and only the gaps are filled, so a page
+      // that is partly named still gets completed. Skipping any page that had
+      // a single name on it left the rest of that page blank forever: one
+      // auto-filled or ghost-accepted strip was enough to make a page look
+      // "already done".
       const globalSeq = buildGlobalKnownSequence(next, dividersByPage, systemDividersByPage);
       if (globalSeq.length === 0) return next;
 
       const pageCount = scoreMetadata?.page_count || 0;
       for (let p = 0; p < pageCount; p++) {
         if (p === currentPage || !isInRange(p, scoreRange)) continue;
-        if ((next[p] || []).some(n => n)) continue;
 
+        const existing = next[p] || [];
+        // A fully named page is left alone; nothing to add and re-running the
+        // sequence over it could only fight what is already there.
         const divs = dividersByPage[p];
         if (!divs || divs.length < 2) continue;
 
         const pageStrips = deriveStrips(divs, systemDividersByPage[p]);
         if (pageStrips.length === 0) continue;
+        if (pageStrips.every((_, i) => existing[i])) continue;
 
-        next[p] = fillPageNames([], pageStrips, globalSeq);
+        next[p] = fillPageNames(existing, pageStrips, globalSeq);
       }
       return next;
     });
