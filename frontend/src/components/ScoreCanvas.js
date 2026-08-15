@@ -95,11 +95,7 @@ const ScoreCanvas = ({
           return (
           <div
             key={index}
-            className={`absolute border border-dashed bg-accent/5 group hover:bg-accent/10 transition-colors ${
-              strip.isSystemStart
-                ? 'border-accent/40 border-l-4 border-l-system'
-                : 'border-accent/40'
-            }`}
+            className="absolute border border-dashed border-accent/40 bg-accent/5 group hover:bg-accent/10 transition-colors"
             style={{
               top: strip.start,
               left: 0,
@@ -107,16 +103,6 @@ const ScoreCanvas = ({
               height: strip.height
             }}
           >
-            {/* System-start marker. A system boundary was previously conveyed
-                only by the divider line and its handle, both of which are easy
-                to miss among 20+ strips -- so the name cycle restarting was the
-                only clue that a new system had begun. This puts the boundary in
-                the strip layer, where the names are. */}
-            {strip.isSystemStart && (
-              <div className="absolute top-0 left-0 bg-system text-white text-[10px] font-semibold px-1.5 py-0.5 rounded-br pointer-events-none">
-                SYS
-              </div>
-            )}
             {/* Name tag. Sits just inside the right edge rather than top-left:
                 the left of a staff carries the clef, key signature and printed
                 instrument name -- the very things you read to check the tag is
