@@ -44,12 +44,11 @@ function isBetterCandidate(cand, best) {
 }
 
 /**
- * Fill empty strip names from a sequence, restarting it at each system start.
+ * Fill empty strip names from a sequence, cycling it and restarting at each
+ * system start.
  *
- * A system with more staves than the sequence has names leaves the surplus
- * blank rather than wrapping. Wrapping produced plausible-looking names — a
- * second "Vl1" after "Continuo" — that silently hid an over-detected staff.
- * A blank shows exactly where detection and the ensemble disagree.
+ * Cycling is what lets a short sequence name a long page: two names give
+ * Vl1/Vl2/Vl1/Vl2, and the list grows as the user types more of them.
  *
  * Names already present are preserved, and the sequence position resyncs to
  * them so later fills stay aligned with what the user actually typed.
@@ -69,7 +68,7 @@ export function fillNames(names, strips, sequence) {
     if (strips[i].isSystemStart) seqIdx = 0;
 
     if (!result[i]) {
-      result[i] = seqIdx < sequence.length ? sequence[seqIdx] : '';
+      result[i] = sequence[seqIdx % sequence.length];
       seqIdx++;
     } else {
       const pos = sequence.indexOf(result[i]);
@@ -77,4 +76,82 @@ export function fillNames(names, strips, sequence) {
     }
   }
   return result;
+}
+
+/**
+ * Choose which sequence the ghost narrows against on the page being edited.
+ *
+ * The page's own sequence wins only when it holds more than one name.
+ * `buildKnownSequence` stops at the first empty strip, so a page where only
+ * strip 0 is named yields a one-name sequence — enough to name the first strip
+ * of each system and blank every other one. That is the common case while
+ * typing, and it must lose to the score-wide vote rather than beat it.
+ *
+ * A one-name page sequence still beats nothing: on a fresh score no other page
+ * has names yet, so the vote is empty and the page's own is all there is.
+ *
+ * @param {string[]} pageSeq - the current page's own sequence.
+ * @param {string[]} globalSeq - the score-wide vote.
+ * @returns {string[]} the sequence to suggest from.
+ */
+export function pickSuggestionSequence(pageSeq, globalSeq) {
+  if (pageSeq.length > 1) return pageSeq;
+  return globalSeq.length > 0 ? globalSeq : pageSeq;
+}
+
+/**
+ * What does the sequence call strip `index` on this page, given what's typed
+ * there so far?
+ *
+ * Walks the same position-tracking as `fillNames` up to `index` (restarting
+ * at each system start, resyncing to any preceding typed names), then matches
+ * `prefix` against the resulting candidate case-insensitively. An empty
+ * prefix returns the candidate outright; a prefix that doesn't match, or that
+ * already equals the candidate, returns ''.
+ *
+ * @param {string[]} names - existing names for strips before `index`.
+ * @param {{isSystemStart: boolean}[]} strips - strips for one page, in order.
+ * @param {string[]} sequence - the instrument order to apply.
+ * @param {number} index - the strip being resolved.
+ * @param {string} prefix - text typed so far in that strip's field.
+ * @returns {string} the suggested name in canonical casing, or ''.
+ */
+export function resolveGhostName(names, strips, sequence, index, prefix) {
+  if (!sequence.length || index >= strips.length) return '';
+
+  let seqIdx = 0;
+  for (let i = 0; i < index; i++) {
+    if (strips[i].isSystemStart) seqIdx = 0;
+    const existing = names[i];
+    if (existing) {
+      const pos = sequence.indexOf(existing);
+      seqIdx = pos !== -1 ? pos + 1 : seqIdx + 1;
+    } else {
+      seqIdx++;
+    }
+  }
+  if (strips[index].isSystemStart) seqIdx = 0;
+
+  // Cycle, matching autoFillStripNames: with nothing typed the hint must be
+  // what prefill would write. Cycling is also what makes the list expand --
+  // one name paints the page, two alternate, and so on.
+  const positional = sequence[seqIdx % sequence.length];
+  const typed = prefix || '';
+
+  if (!typed) return positional || '';
+
+  // Once the user types, the prefix decides. The positional guess is tried
+  // first so an unchanged field keeps its own name, then the rest of the
+  // sequence in order -- typing "v" against Vl1/Vl2/Vla must reach Vl1, not
+  // stay on whatever this slot happened to be.
+  const lower = typed.toLowerCase();
+  const matches = (name) => name && name.toLowerCase().startsWith(lower)
+    && name.length > typed.length;
+
+  if (matches(positional)) return positional;
+  for (let i = 0; i < sequence.length; i++) {
+    const candidate = sequence[(seqIdx + 1 + i) % sequence.length];
+    if (matches(candidate)) return candidate;
+  }
+  return '';
 }

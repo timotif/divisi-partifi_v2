@@ -9,8 +9,11 @@ import AnnotationsPanel from './components/AnnotationsPanel';
 import LayoutPreview from './components/LayoutPreview';
 import LibraryScreen from './components/LibraryScreen';
 import { isPageInRange as isInRange, updateRange } from './utils/scoreRange';
-import { pickMostCommonSequence, fillNames } from './utils/knownSequence';
-import { buildNameCandidates } from './utils/stripNameSuggest';
+import {
+  pickMostCommonSequence,
+  fillNames,
+  pickSuggestionSequence,
+} from './utils/knownSequence';
 
 const STRIP_COLUMN_WIDTH = 160;
 const ANNOTATIONS_PANEL_WIDTH = 176; // w-44 = 11rem = 176px
@@ -51,9 +54,6 @@ const MusicPartitioner = () => {
 
   // --- Per-page strip names ---
   const [stripNamesByPage, setStripNamesByPage] = useState({});
-
-  // --- Per-page OCR-suggested strip names (backend detect field, may be absent) ---
-  const [suggestedNamesByPage, setSuggestedNamesByPage] = useState({});
 
   // --- Export results ---
   const [exportResult, setExportResult] = useState(null);
@@ -200,13 +200,6 @@ const MusicPartitioner = () => {
   const currentStripNames = stripNamesByPage[currentPage] || [];
   const currentSystemDividers = systemDividersByPage[currentPage] || [];
   const currentSnapFlags = snapFlagsByPage[currentPage] || [];
-  const currentSuggestedNames = suggestedNamesByPage[currentPage] || [];
-
-  // Every distinct name typed anywhere in this score, for ghost-text autocomplete.
-  const nameCandidates = useMemo(
-    () => buildNameCandidates(stripNamesByPage),
-    [stripNamesByPage]
-  );
 
   // --- Strips computation ---
   const getStrips = useCallback(() => {
@@ -298,7 +291,14 @@ const MusicPartitioner = () => {
       const names = allNames[p];
       // Only pages inside the score range vote: front matter and pre-extracted
       // parts have their own unrelated layouts.
-      if (!divs || divs.length < 2 || !names || !isInRange(p, scoreRange)) {
+      //
+      // And only pages the user has actually typed on. Auto-filled names are
+      // this function's own output cycled back in: after one name is typed,
+      // prefill writes it to every strip, buildKnownSequence stops at that
+      // repeat, and the one-name sequence gets a majority over the page being
+      // typed -- so the whole score locks onto the first name entered.
+      if (!divs || divs.length < 2 || !names || !isInRange(p, scoreRange)
+          || !confirmedPages.has(p)) {
         perPage.push([]);
         continue;
       }
@@ -306,16 +306,10 @@ const MusicPartitioner = () => {
     }
 
     return pickMostCommonSequence(perPage);
-  }, [scoreMetadata, scoreRange, deriveStrips, buildKnownSequence]);
+  }, [scoreMetadata, scoreRange, confirmedPages, deriveStrips, buildKnownSequence]);
 
-  // `globalSeq` is the score-wide sequence, used when this page cannot supply
-  // one of its own. buildKnownSequence stops at the first empty strip, so a
-  // page where only strip 0 is named yields a one-name sequence -- enough to
-  // name the first strip of each system and blank every other one. That is
-  // the common case now that accepting a suggestion blurs after a single name.
-  const autoFillStripNames = useCallback((names, currentStrips, editedIndex, globalSeq = []) => {
-    const pageSeq = buildKnownSequence(names, currentStrips);
-    const knownNames = pageSeq.length > 1 ? pageSeq : (globalSeq.length ? globalSeq : pageSeq);
+  const autoFillStripNames = useCallback((names, currentStrips, editedIndex) => {
+    const knownNames = buildKnownSequence(names, currentStrips);
     if (knownNames.length === 0) return names;
 
     const editedName = names[editedIndex];
@@ -328,12 +322,20 @@ const MusicPartitioner = () => {
         seqIndex = -1;
       }
       seqIndex++;
-      // Blank past the end of the sequence rather than wrapping -- see the
-      // note on fillPageNames.
-      result[i] = seqIndex < knownNames.length ? knownNames[seqIndex] : '';
+      // Cycle. This is what makes the list expand as it is typed: one name
+      // paints the page, two alternate, and each new name extends the pattern.
+      result[i] = knownNames[seqIndex % knownNames.length];
     }
     return result;
   }, [buildKnownSequence]);
+
+  // Sequence the ghost narrows against. See pickSuggestionSequence for why a
+  // one-name page sequence must lose to the score-wide vote.
+  const currentPageSequence = useMemo(() => {
+    const pageSeq = buildKnownSequence(currentStripNames, strips);
+    const globalSeq = buildGlobalKnownSequence(stripNamesByPage, dividersByPage, systemDividersByPage);
+    return pickSuggestionSequence(pageSeq, globalSeq);
+  }, [buildKnownSequence, currentStripNames, strips, buildGlobalKnownSequence, stripNamesByPage, dividersByPage, systemDividersByPage]);
 
   // --- Score range change handler (clamped, keeps from <= to) ---
   const handleChangeScoreRange = useCallback((field, rawValue) => {
@@ -673,23 +675,18 @@ const MusicPartitioner = () => {
         const allDividers = { ...dividersByPage, [pageNum]: targetDividers };
         const allSysFlags = { ...systemDividersByPage, [pageNum]: targetSysFlags };
         const globalSeq = buildGlobalKnownSequence(prev, allDividers, allSysFlags);
-        const existing = prev[pageNum] || [];
         let filledNames;
         if (globalSeq.length > 0 && pageStrips.length > 0) {
-          filledNames = fillPageNames(existing, pageStrips, globalSeq);
+          filledNames = fillPageNames(prev[pageNum] || [], pageStrips, globalSeq);
         } else {
-          // Propagated names only fill gaps -- they come from a different page
-          // and must never overwrite what the user typed on this one.
-          filledNames = [...existing];
-          getLatestConfirmedStripNames(pageNum).forEach((n, i) => {
-            if (!filledNames[i]) filledNames[i] = n;
-          });
+          const latestNames = getLatestConfirmedStripNames(pageNum);
+          filledNames = [...latestNames];
         }
 
-        // filledNames already preserves existing names and fills only gaps, so
-        // it supersedes what is there. Discarding it whenever the page had any
-        // name was what left partly-named pages permanently incomplete.
-        return { ...prev, [pageNum]: filledNames };
+        return {
+          ...prev,
+          [pageNum]: prev[pageNum]?.length ? prev[pageNum] : filledNames,
+        };
       });
     }
 
@@ -777,9 +774,9 @@ const MusicPartitioner = () => {
       // Auto-fill strip names from the global known sequence
       setStripNamesByPage(prev => {
         const pageStrips = deriveStrips(dividers, data.system_flags);
-        // Fill only the gaps. Bailing out when the page had any name left the
-        // rest of it blank forever: one auto-filled or ghost-accepted strip
-        // was enough to make the page look finished.
+        // Bail only when the page already carries real names. Testing for a
+        // non-empty array instead let a page detected before any naming keep
+        // the empty strip_names detection wrote, and nothing filled it later.
         const existing = prev[pageNum] || [];
         if (pageStrips.length > 0 && pageStrips.every((_, i) => existing[i])) return prev;
         // Overlay this page's freshly detected geometry onto the closure
@@ -792,14 +789,12 @@ const MusicPartitioner = () => {
         if (globalSeq.length > 0 && pageStrips.length > 0) {
           return { ...prev, [pageNum]: fillPageNames(existing, pageStrips, globalSeq) };
         }
-        // No sequence to apply yet: keep whatever the user already has and
-        // only take the backend's names for strips that are still empty.
+        // No sequence yet: keep what the user has and take the backend's names
+        // only for strips still empty.
         const merged = [...existing];
         (data.strip_names || []).forEach((n, i) => { if (!merged[i]) merged[i] = n; });
         return { ...prev, [pageNum]: merged };
       });
-      // OCR-suggested names: backend field may not exist yet.
-      setSuggestedNamesByPage(prev => ({ ...prev, [pageNum]: data.suggested_names || [] }));
 
       // Mark as detected but NOT confirmed — user must review
       setDetectedPages(prev => new Set(prev).add(pageNum));
@@ -1120,42 +1115,37 @@ const MusicPartitioner = () => {
   const handleStripNameBlur = (stripIndex) => {
     setStripNamesByPage(prev => {
       const names = [...(prev[currentPage] || [])];
-      // Vote across the score first, so a page naming its first strip only can
-      // still fill the rest from a sequence another page established.
-      const seq = buildGlobalKnownSequence(prev, dividersByPage, systemDividersByPage);
-      const filled = autoFillStripNames(names, strips, stripIndex, seq);
+      const filled = autoFillStripNames(names, strips, stripIndex);
       const next = { ...prev, [currentPage]: filled };
 
-      // Seed every other page that has geometry but no names yet.
+      // Push the sequence out to every page the user has not touched.
       //
-      // Detection populates dividers without names, so on a fresh score no page
-      // has a sequence and the vote returns nothing -- leaving every page blank
-      // no matter how many are detected. The first page the user names is what
-      // makes a sequence exist, so that is the moment to propagate it.
+      // Detection runs when a page is first viewed, before any name exists to
+      // build a sequence from, so it leaves the page unnamed and marks it done.
+      // goToPage then skips it (auto-detect is on) and nothing fills it again.
+      // Naming a strip here is the moment a sequence exists, so it is the
+      // moment to propagate.
       //
-      // Existing names are preserved and only the gaps are filled, so a page
-      // that is partly named still gets completed. Skipping any page that had
-      // a single name on it left the rest of that page blank forever: one
-      // auto-filled or ghost-accepted strip was enough to make a page look
-      // "already done".
+      // Unconfirmed pages are re-filled from scratch, not just gap-filled: the
+      // sequence grows as the user types, so a page seeded earlier from a
+      // one-name sequence holds "vl1" on every strip and must be redone once
+      // "vl2" exists. confirmedPages marks the pages the user typed on -- those
+      // are theirs and are never overwritten.
       const globalSeq = buildGlobalKnownSequence(next, dividersByPage, systemDividersByPage);
       if (globalSeq.length === 0) return next;
 
       const pageCount = scoreMetadata?.page_count || 0;
       for (let p = 0; p < pageCount; p++) {
         if (p === currentPage || !isInRange(p, scoreRange)) continue;
+        if (confirmedPages.has(p)) continue;
 
-        const existing = next[p] || [];
-        // A fully named page is left alone; nothing to add and re-running the
-        // sequence over it could only fight what is already there.
         const divs = dividersByPage[p];
         if (!divs || divs.length < 2) continue;
 
         const pageStrips = deriveStrips(divs, systemDividersByPage[p]);
         if (pageStrips.length === 0) continue;
-        if (pageStrips.every((_, i) => existing[i])) continue;
 
-        next[p] = fillPageNames(existing, pageStrips, globalSeq);
+        next[p] = fillPageNames([], pageStrips, globalSeq);
       }
       return next;
     });
@@ -1502,11 +1492,10 @@ const MusicPartitioner = () => {
             <StripNamesColumn
               strips={strips}
               stripNames={currentStripNames}
+              sequence={currentPageSequence}
               pageHeight={pageHeight}
               onUpdateName={updateStripName}
               onBlurName={handleStripNameBlur}
-              nameCandidates={nameCandidates}
-              suggestedNames={currentSuggestedNames}
             />
 
             {/* Sheet music */}
