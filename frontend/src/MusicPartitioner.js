@@ -308,8 +308,14 @@ const MusicPartitioner = () => {
     return pickMostCommonSequence(perPage);
   }, [scoreMetadata, scoreRange, deriveStrips, buildKnownSequence]);
 
-  const autoFillStripNames = useCallback((names, currentStrips, editedIndex) => {
-    const knownNames = buildKnownSequence(names, currentStrips);
+  // `globalSeq` is the score-wide sequence, used when this page cannot supply
+  // one of its own. buildKnownSequence stops at the first empty strip, so a
+  // page where only strip 0 is named yields a one-name sequence -- enough to
+  // name the first strip of each system and blank every other one. That is
+  // the common case now that accepting a suggestion blurs after a single name.
+  const autoFillStripNames = useCallback((names, currentStrips, editedIndex, globalSeq = []) => {
+    const pageSeq = buildKnownSequence(names, currentStrips);
+    const knownNames = pageSeq.length > 1 ? pageSeq : (globalSeq.length ? globalSeq : pageSeq);
     if (knownNames.length === 0) return names;
 
     const editedName = names[editedIndex];
@@ -1114,7 +1120,10 @@ const MusicPartitioner = () => {
   const handleStripNameBlur = (stripIndex) => {
     setStripNamesByPage(prev => {
       const names = [...(prev[currentPage] || [])];
-      const filled = autoFillStripNames(names, strips, stripIndex);
+      // Vote across the score first, so a page naming its first strip only can
+      // still fill the rest from a sequence another page established.
+      const seq = buildGlobalKnownSequence(prev, dividersByPage, systemDividersByPage);
+      const filled = autoFillStripNames(names, strips, stripIndex, seq);
       const next = { ...prev, [currentPage]: filled };
 
       // Seed every other page that has geometry but no names yet.
