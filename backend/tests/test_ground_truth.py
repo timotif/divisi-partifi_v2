@@ -8,15 +8,23 @@ Ground truth is `buxtehude_ground_truth.json`, exported from a setup the user
 placed by hand over pages 2-16 (1-indexed score range 3-17).  Coordinates are
 display pixels at `display_width`; they are scaled to backend pixels here.
 
-Baseline at the time of writing: median error 0.16 mm, 90th percentile
-0.54 mm.  The thresholds below sit above those with headroom, so this fails
-on regression rather than on noise.
+Baseline: median error 0.17 mm, 90th percentile 0.66 mm.  The thresholds
+below sit above those with headroom, so this fails on regression rather than
+on noise.
 
-Known open failures, deliberately not asserted (see handoff items 7-8):
-  - p2, p3: system dividers under-detected (1 found where 2-3 expected)
-  - p5, p11, p12, p16: spurious extra dividers (25/26/28/13 found where
-    24/24/24/12).  Positions on these pages are still accurate, so p5 is
-    exercised for accuracy but excluded from the count check.
+Every page in the score range now matches the human divider count, so both
+accuracy and count are asserted over the whole range.  The pages that used
+to be excluded each exposed a distinct defect:
+
+  - p2, p3: all staves collapsed into one system.  Grouping relied on a
+    single page-global barline column, but a first system labelled
+    ``VIOLIN I`` carries its barline ~160 px right of later systems labelled
+    ``V. I``, so whole systems went unseen.  Systems are now grouped by
+    testing whether *any* column bridges the gap between two staves.
+  - p5, p11, p12: spurious staves synthesized over lyric lines, some
+    overlapping their neighbour.  Rescued candidates are now checked for a
+    staff-width ink row and merged when they abut.
+  - p16: a colophon paragraph accepted as a 210 px stave among 60 px ones.
 """
 
 import json
@@ -33,15 +41,19 @@ IMG_DIR = pathlib.Path(__file__).parent / "img"
 PDF = IMG_DIR / "buxtehude.pdf"
 GROUND_TRUTH = IMG_DIR / "buxtehude_ground_truth.json"
 
-# Pages where detection currently matches the human closely. Excludes the
-# known-broken pages listed in the module docstring.
-CLEAN_PAGES = [4, 5, 6, 7, 8, 9, 10, 13, 14, 15]
+# The whole score range (0-based). Front matter and the pre-extracted parts
+# that follow p16 are outside the range a user would select.
+CLEAN_PAGES = list(range(2, 17))
 
-# Subset whose divider *count* also matches; p5 is accurate but finds one extra.
-EXACT_COUNT_PAGES = [p for p in CLEAN_PAGES if p != 5]
+# Count now matches the human on every page in the range.
+EXACT_COUNT_PAGES = CLEAN_PAGES
 
 MEDIAN_ERROR_MM = 0.35
+# Per-page 90th percentile. p2 reaches 2.25 mm: its three systems are packed
+# tightly enough that a handful of cuts land visibly off the human's line
+# while the median stays at 0.16 mm.
 P90_ERROR_MM = 1.0
+PAGE_P90_ERROR_MM = 2.5
 DPI = 300
 
 
