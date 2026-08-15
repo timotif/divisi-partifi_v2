@@ -9,6 +9,7 @@ import AnnotationsPanel from './components/AnnotationsPanel';
 import LayoutPreview from './components/LayoutPreview';
 import LibraryScreen from './components/LibraryScreen';
 import { isPageInRange as isInRange, updateRange } from './utils/scoreRange';
+import { pickMostCommonSequence } from './utils/knownSequence';
 
 const STRIP_COLUMN_WIDTH = 160;
 const ANNOTATIONS_PANEL_WIDTH = 176; // w-44 = 11rem = 176px
@@ -277,21 +278,37 @@ const MusicPartitioner = () => {
     return result;
   }, []);
 
-  // Build the global known sequence by scanning ALL pages for the first one that
-  // has a complete sequence in its first system.
+  // Build the global known sequence by letting every page vote for the sequence
+  // it shows, then taking the most common one.
+  //
+  // This used to return the first page with any sequence, which let a single
+  // unrepresentative page set the naming for the whole score. A real case: a
+  // score whose opening page carries 7 instruments while the remaining 14 pages
+  // carry 11. The 7-name sequence won on page order alone and then miscycled
+  // across every later page, so names had to be retyped on each one. By vote,
+  // the 11-name sequence wins 14-to-1 and 13 of 15 pages fill correctly.
+  //
+  // Ties break toward the longer sequence, then toward the earlier page: a
+  // longer sequence names more strips, and a shorter one is usually a page
+  // where fewer instruments happen to play.
   const buildGlobalKnownSequence = useCallback((allNames, allDividers, allSystemFlags) => {
     const pageCount = scoreMetadata?.page_count || 0;
+    const perPage = [];
+
     for (let p = 0; p < pageCount; p++) {
       const divs = allDividers[p];
-      const sysFlags = allSystemFlags[p];
       const names = allNames[p];
-      if (!divs || divs.length < 2 || !names) continue;
-      const pageStrips = deriveStrips(divs, sysFlags);
-      const seq = buildKnownSequence(names, pageStrips);
-      if (seq.length > 0) return seq;
+      // Only pages inside the score range vote: front matter and pre-extracted
+      // parts have their own unrelated layouts.
+      if (!divs || divs.length < 2 || !names || !isInRange(p, scoreRange)) {
+        perPage.push([]);
+        continue;
+      }
+      perPage.push(buildKnownSequence(names, deriveStrips(divs, allSystemFlags[p])));
     }
-    return [];
-  }, [scoreMetadata, deriveStrips, buildKnownSequence]);
+
+    return pickMostCommonSequence(perPage);
+  }, [scoreMetadata, scoreRange, deriveStrips, buildKnownSequence]);
 
   const autoFillStripNames = useCallback((names, currentStrips, editedIndex) => {
     const knownNames = buildKnownSequence(names, currentStrips);
@@ -750,7 +767,13 @@ const MusicPartitioner = () => {
       setStripNamesByPage(prev => {
         if (prev[pageNum]?.length > 0) return prev;
         const pageStrips = deriveStrips(dividers, data.system_flags);
-        const globalSeq = buildGlobalKnownSequence(prev, dividersByPage, systemDividersByPage);
+        // Overlay this page's freshly detected geometry onto the closure
+        // snapshot before voting: during a sequential rescan, dividersByPage
+        // is the value captured when this callback was built and does not yet
+        // include the page being detected.
+        const allDividers = { ...dividersByPage, [pageNum]: dividers };
+        const allSysFlags = { ...systemDividersByPage, [pageNum]: data.system_flags };
+        const globalSeq = buildGlobalKnownSequence(prev, allDividers, allSysFlags);
         if (globalSeq.length > 0 && pageStrips.length > 0) {
           return { ...prev, [pageNum]: fillPageNames([], pageStrips, globalSeq) };
         }
@@ -1077,7 +1100,34 @@ const MusicPartitioner = () => {
     setStripNamesByPage(prev => {
       const names = [...(prev[currentPage] || [])];
       const filled = autoFillStripNames(names, strips, stripIndex);
-      return { ...prev, [currentPage]: filled };
+      const next = { ...prev, [currentPage]: filled };
+
+      // Seed every other page that has geometry but no names yet.
+      //
+      // Detection populates dividers without names, so on a fresh score no page
+      // has a sequence and the vote returns nothing -- leaving every page blank
+      // no matter how many are detected. The first page the user names is what
+      // makes a sequence exist, so that is the moment to propagate it.
+      //
+      // Only untouched pages are filled: a page with any name on it is either
+      // already done or deliberately different, and must not be overwritten.
+      const globalSeq = buildGlobalKnownSequence(next, dividersByPage, systemDividersByPage);
+      if (globalSeq.length === 0) return next;
+
+      const pageCount = scoreMetadata?.page_count || 0;
+      for (let p = 0; p < pageCount; p++) {
+        if (p === currentPage || !isInRange(p, scoreRange)) continue;
+        if ((next[p] || []).some(n => n)) continue;
+
+        const divs = dividersByPage[p];
+        if (!divs || divs.length < 2) continue;
+
+        const pageStrips = deriveStrips(divs, systemDividersByPage[p]);
+        if (pageStrips.length === 0) continue;
+
+        next[p] = fillPageNames([], pageStrips, globalSeq);
+      }
+      return next;
     });
   };
 

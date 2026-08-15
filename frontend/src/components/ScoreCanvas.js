@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Trash2, X } from 'lucide-react';
 
 // Half-height of the invisible band around a divider line that accepts drags.
@@ -33,6 +34,13 @@ const ScoreCanvas = ({
   isDetecting,
   detectionWarning,
 }) => {
+  // Dismissal is per page and per warning text, so navigating to another
+  // problem page (or re-running detection) surfaces the banner again.
+  const [dismissedKey, setDismissedKey] = useState(null);
+  const warningKey = `${currentPage}:${detectionWarning}`;
+  const warningDismissed = dismissedKey === warningKey;
+  const setWarningDismissed = () => setDismissedKey(warningKey);
+
   return (
     <div className="border border-surface-border rounded-md overflow-hidden" style={{ width: pageWidth, flexShrink: 0 }}>
       <div
@@ -95,10 +103,14 @@ const ScoreCanvas = ({
               height: strip.height
             }}
           >
-            <div className="absolute top-1 left-2 bg-accent/70 text-white px-2 py-0.5 rounded text-xs">
+            {/* Name tag. Sits just inside the right edge rather than top-left:
+                the left of a staff carries the clef, key signature and printed
+                instrument name -- the very things you read to check the tag is
+                right. Fades on hover so it never permanently hides music. */}
+            <div className="absolute top-1 right-2 bg-accent/70 group-hover:opacity-20 text-white px-2 py-0.5 rounded text-xs pointer-events-none transition-opacity max-w-[45%] truncate">
               {stripNames[index] || `Part ${num}`}
             </div>
-            <div className="absolute top-2 right-2 bg-black/40 text-white px-2 py-1 rounded text-xs opacity-0 group-hover:opacity-100 transition-opacity">
+            <div className="absolute bottom-1 right-2 bg-black/40 text-white px-2 py-1 rounded text-xs opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
               {strip.height}px tall
             </div>
           </div>
@@ -279,10 +291,19 @@ const ScoreCanvas = ({
           </div>
         )}
 
-        {/* Detection warning banner */}
-        {detectionWarning && !isDetecting && (
-          <div className="absolute top-2 left-2 right-2 z-40 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 text-xs text-yellow-700 pointer-events-none">
+        {/* Detection warning banner. Dismissible, and anchored to the bottom:
+            the top of the page is where the first system sits. */}
+        {detectionWarning && !isDetecting && !warningDismissed && (
+          <div className="absolute bottom-2 left-2 right-2 z-40 bg-yellow-50/95 border border-yellow-200 rounded-md pl-3 pr-8 py-2 text-xs text-yellow-700 shadow-sm">
             {detectionWarning}
+            <button
+              className="absolute top-1 right-1 p-1 rounded hover:bg-yellow-200/70 transition-colors"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); setWarningDismissed(true); }}
+              title="Dismiss"
+            >
+              <X className="w-3 h-3" />
+            </button>
           </div>
         )}
       </div>
