@@ -9,7 +9,7 @@ import AnnotationsPanel from './components/AnnotationsPanel';
 import LayoutPreview from './components/LayoutPreview';
 import LibraryScreen from './components/LibraryScreen';
 import { isPageInRange as isInRange, updateRange } from './utils/scoreRange';
-import { pickMostCommonSequence } from './utils/knownSequence';
+import { pickMostCommonSequence, fillNames } from './utils/knownSequence';
 
 const STRIP_COLUMN_WIDTH = 160;
 const ANNOTATIONS_PANEL_WIDTH = 176; // w-44 = 11rem = 176px
@@ -252,31 +252,18 @@ const MusicPartitioner = () => {
     return result;
   }, []);
 
-  // Fill empty strip names on a single page using a known sequence, cycling and
-  // resetting at system dividers. For non-empty names (user-typed), sync the
+  // Fill empty strip names on a single page using a known sequence, restarting
+  // it at each system divider. For non-empty names (user-typed), sync the
   // sequence position to that name so subsequent fills continue correctly.
-  const fillPageNames = useCallback((names, pageStrips, knownSeq) => {
-    if (!knownSeq.length || !pageStrips.length) return names;
-    const result = [...names];
-    let seqIdx = 0;
-    for (let i = 0; i < pageStrips.length; i++) {
-      if (pageStrips[i].isSystemStart) seqIdx = 0;
-      if (!result[i] || result[i] === '') {
-        // Empty: fill from sequence
-        result[i] = knownSeq[seqIdx % knownSeq.length];
-        seqIdx++;
-      } else {
-        // Non-empty (user-typed): sync sequence position to this name
-        const pos = knownSeq.indexOf(result[i]);
-        if (pos !== -1) {
-          seqIdx = pos + 1;
-        } else {
-          seqIdx++;
-        }
-      }
-    }
-    return result;
-  }, []);
+  //
+  // A system with more staves than the sequence has names leaves the surplus
+  // BLANK rather than wrapping around. Wrapping produced plausible-looking
+  // names ("Vl1" again after "Continuo") that silently hid an over-detected
+  // staff; a blank shows exactly where detection and the ensemble disagree.
+  const fillPageNames = useCallback(
+    (names, pageStrips, knownSeq) => fillNames(names, pageStrips, knownSeq),
+    []
+  );
 
   // Build the global known sequence by letting every page vote for the sequence
   // it shows, then taking the most common one.
@@ -324,7 +311,9 @@ const MusicPartitioner = () => {
         seqIndex = -1;
       }
       seqIndex++;
-      result[i] = knownNames[seqIndex % knownNames.length];
+      // Blank past the end of the sequence rather than wrapping -- see the
+      // note on fillPageNames.
+      result[i] = seqIndex < knownNames.length ? knownNames[seqIndex] : '';
     }
     return result;
   }, [buildKnownSequence]);

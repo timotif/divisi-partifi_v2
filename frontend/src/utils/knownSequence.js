@@ -42,3 +42,39 @@ function isBetterCandidate(cand, best) {
   if (cand.seq.length !== best.seq.length) return cand.seq.length > best.seq.length;
   return cand.firstIndex < best.firstIndex;
 }
+
+/**
+ * Fill empty strip names from a sequence, restarting it at each system start.
+ *
+ * A system with more staves than the sequence has names leaves the surplus
+ * blank rather than wrapping. Wrapping produced plausible-looking names — a
+ * second "Vl1" after "Continuo" — that silently hid an over-detected staff.
+ * A blank shows exactly where detection and the ensemble disagree.
+ *
+ * Names already present are preserved, and the sequence position resyncs to
+ * them so later fills stay aligned with what the user actually typed.
+ *
+ * @param {string[]} names - existing names; empty slots get filled.
+ * @param {{isSystemStart: boolean}[]} strips - strips for one page, in order.
+ * @param {string[]} sequence - the instrument order to apply.
+ * @returns {string[]} names, filled.
+ */
+export function fillNames(names, strips, sequence) {
+  if (!sequence.length || !strips.length) return names;
+
+  const result = [...names];
+  let seqIdx = 0;
+
+  for (let i = 0; i < strips.length; i++) {
+    if (strips[i].isSystemStart) seqIdx = 0;
+
+    if (!result[i]) {
+      result[i] = seqIdx < sequence.length ? sequence[seqIdx] : '';
+      seqIdx++;
+    } else {
+      const pos = sequence.indexOf(result[i]);
+      seqIdx = pos !== -1 ? pos + 1 : seqIdx + 1;
+    }
+  }
+  return result;
+}

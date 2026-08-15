@@ -95,7 +95,11 @@ const ScoreCanvas = ({
           return (
           <div
             key={index}
-            className="absolute border border-dashed border-accent/40 bg-accent/5 group hover:bg-accent/10 transition-colors"
+            className={`absolute border border-dashed bg-accent/5 group hover:bg-accent/10 transition-colors ${
+              strip.isSystemStart
+                ? 'border-accent/40 border-l-4 border-l-system'
+                : 'border-accent/40'
+            }`}
             style={{
               top: strip.start,
               left: 0,
@@ -103,6 +107,16 @@ const ScoreCanvas = ({
               height: strip.height
             }}
           >
+            {/* System-start marker. A system boundary was previously conveyed
+                only by the divider line and its handle, both of which are easy
+                to miss among 20+ strips -- so the name cycle restarting was the
+                only clue that a new system had begun. This puts the boundary in
+                the strip layer, where the names are. */}
+            {strip.isSystemStart && (
+              <div className="absolute top-0 left-0 bg-system text-white text-[10px] font-semibold px-1.5 py-0.5 rounded-br pointer-events-none">
+                SYS
+              </div>
+            )}
             {/* Name tag. Sits just inside the right edge rather than top-left:
                 the left of a staff carries the clef, key signature and printed
                 instrument name -- the very things you read to check the tag is
@@ -129,7 +143,13 @@ const ScoreCanvas = ({
           // be ~10px apart; this pulls their handles apart without the offset
           // ever depending on distance -- a distance-conditional stagger would
           // make a handle jump sideways mid-drag as the gap closed.
-          const handleOffset = isSystem ? -HANDLE_OFFSET : HANDLE_OFFSET;
+          // Clamp into the canvas: the wrapper is overflow-hidden, so a system
+          // divider near y=0 would otherwise have its handle clipped away --
+          // exactly the handle you need to recognise the first system.
+          const handleTop = Math.max(
+            0,
+            Math.min(pageHeight - 16, y - 8 + (isSystem ? -HANDLE_OFFSET : HANDLE_OFFSET))
+          );
           return (
           <div key={index}>
             {/* Divider line */}
@@ -183,7 +203,7 @@ const ScoreCanvas = ({
                     : 'bg-accent hover:bg-accent/80'
               }`}
               style={{
-                top: y - 8 + handleOffset,
+                top: handleTop,
                 left: pageWidth - 20
               }}
               onMouseDown={(e) => { e.stopPropagation(); onDividerMouseDown(e, index); }}
@@ -204,7 +224,7 @@ const ScoreCanvas = ({
             <button
               className="absolute w-4 h-4 bg-gray-400 rounded-full cursor-pointer z-20 flex items-center justify-center hover:bg-danger transition-colors text-white"
               style={{
-                top: y - 8 + handleOffset,
+                top: handleTop,
                 left: pageWidth - 36
               }}
               onMouseDown={(e) => e.stopPropagation()}
