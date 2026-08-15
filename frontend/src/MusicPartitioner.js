@@ -8,6 +8,7 @@ import ScoreCanvas from './components/ScoreCanvas';
 import AnnotationsPanel from './components/AnnotationsPanel';
 import LayoutPreview from './components/LayoutPreview';
 import LibraryScreen from './components/LibraryScreen';
+import { isPageInRange as isInRange, updateRange } from './utils/scoreRange';
 
 const STRIP_COLUMN_WIDTH = 160;
 const ANNOTATIONS_PANEL_WIDTH = 176; // w-44 = 11rem = 176px
@@ -54,6 +55,9 @@ const MusicPartitioner = () => {
 
   // --- Staff detection state ---
   const [autoDetect, setAutoDetect] = useState(true);
+  // Score page range (1-indexed, inclusive) — pages outside it are front matter,
+  // blanks, or pre-extracted parts and are excluded from detection and export.
+  const [scoreRange, setScoreRange] = useState({ from: 1, to: 1 });
   const [detectedPages, setDetectedPages] = useState(new Set());
   const [detectingPage, setDetectingPage] = useState(null); // page number or null
   const [detectionWarnings, setDetectionWarnings] = useState({});
@@ -306,6 +310,18 @@ const MusicPartitioner = () => {
     return result;
   }, [buildKnownSequence]);
 
+  // --- Score range change handler (clamped, keeps from <= to) ---
+  const handleChangeScoreRange = useCallback((field, rawValue) => {
+    const pageCount = scoreMetadata?.page_count || 1;
+    setScoreRange(prev => updateRange(prev, field, rawValue, pageCount));
+  }, [scoreMetadata]);
+
+  // --- Helper: is a 0-indexed page inside the score range? ---
+  const isPageInRange = useCallback(
+    (pageIdx) => isInRange(pageIdx, scoreRange),
+    [scoreRange]
+  );
+
   // --- Helper: get the most recently confirmed page's dividers ---
   const getLatestConfirmedDividers = useCallback((beforePage) => {
     for (let i = beforePage - 1; i >= 0; i--) {
@@ -360,6 +376,7 @@ const MusicPartitioner = () => {
         pageBreaksByPart: Object.fromEntries(
           Object.entries(pageBreaksByPart).map(([k, v]) => [k, [...v]])
         ),
+        scoreRange,
       };
       fetch(`/api/scores/${scoreId}/setup`, {
         method: 'POST',
@@ -376,7 +393,7 @@ const MusicPartitioner = () => {
     scoreId, phase, pageWidth, autoSaveVersionName,
     dividersByPage, systemDividersByPage, snapFlagsByPage,
     stripNamesByPage, confirmedPages, headerRegion, markings,
-    spacingByPart, offsetsByPart, pageBreaksByPart,
+    spacingByPart, offsetsByPart, pageBreaksByPart, scoreRange,
   ]);
 
   // --- Helpers: reset all editor state ---
@@ -404,6 +421,7 @@ const MusicPartitioner = () => {
     setOffsetsByPart({});
     setPageBreaksByPart({});
     setExportResult(null);
+    setScoreRange({ from: 1, to: Math.max(1, pageCount) });
     prevPageWidthRef.current = null;
   };
 
@@ -549,6 +567,14 @@ const MusicPartitioner = () => {
           restoredBreaks[partName] = new Set(arr);
         }
         setPageBreaksByPart(restoredBreaks);
+
+        // Setups saved before the score-range feature have no scoreRange:
+        // fall back to the whole document so they behave as before.
+        if (s.scoreRange && s.scoreRange.from && s.scoreRange.to) {
+          setScoreRange(s.scoreRange);
+        } else {
+          setScoreRange({ from: 1, to: Math.max(1, pageCount) });
+        }
       }
 
       // If generated parts exist, expose them for download
@@ -741,10 +767,12 @@ const MusicPartitioner = () => {
 
   // Trigger detection when a page is viewed in edit mode and pageWidth is ready
   useEffect(() => {
-    if (autoDetect && phase === 'edit' && scoreId && pageWidth > 1) {
+    // Skip out-of-range pages: running detection on title pages or pre-extracted
+    // parts wastes a request and produces spurious dividers from text lines.
+    if (autoDetect && phase === 'edit' && scoreId && pageWidth > 1 && isPageInRange(currentPage)) {
       detectStavesForPage(currentPage);
     }
-  }, [autoDetect, phase, scoreId, pageWidth, currentPage, detectStavesForPage]);
+  }, [autoDetect, phase, scoreId, pageWidth, currentPage, detectStavesForPage, isPageInRange]);
 
   // Force-rescan the current page: clear all detection state so the auto-detect
   // useEffect re-triggers. Intended to be called after user confirmation.
@@ -1046,7 +1074,14 @@ const MusicPartitioner = () => {
 
   // --- Export handler ---
   const handleExport = async () => {
-    const unconfirmedCount = scoreMetadata.page_count - confirmedPages.size;
+    // Count only in-range pages: out-of-range pages are never partitioned,
+    // so they should not trigger the review warning.
+    const inRangeCount = scoreRange.to - scoreRange.from + 1;
+    let confirmedInRange = 0;
+    for (const p of confirmedPages) {
+      if (isPageInRange(p)) confirmedInRange++;
+    }
+    const unconfirmedCount = inRangeCount - confirmedInRange;
     if (unconfirmedCount > 0) {
       const proceed = window.confirm(
         `${unconfirmedCount} page(s) have not been reviewed. Proceed with export?`
@@ -1061,10 +1096,14 @@ const MusicPartitioner = () => {
     const globalSeq = buildGlobalKnownSequence(stripNamesByPage, dividersByPage, systemDividersByPage);
 
     const pagesPayload = {};
-    for (let i = 0; i < scoreMetadata.page_count; i++) {
-      const dividers = dividersByPage[i] || dividersByPage[0] || [];
-      const systemFlags = systemDividersByPage[i] || systemDividersByPage[0] || [];
-      let names = stripNamesByPage[i] || stripNamesByPage[0] || [];
+    // Only pages inside the score range are partitioned; front matter, blanks
+    // and pre-extracted parts are skipped entirely.
+    const firstIdx = scoreRange.from - 1;
+    for (let i = firstIdx; i <= scoreRange.to - 1; i++) {
+      // Fall back to the first in-range page (not page 0, which may be a title page).
+      const dividers = dividersByPage[i] || dividersByPage[firstIdx] || [];
+      const systemFlags = systemDividersByPage[i] || systemDividersByPage[firstIdx] || [];
+      let names = stripNamesByPage[i] || stripNamesByPage[firstIdx] || [];
 
       if (dividers.length < 2) continue;
 
@@ -1287,6 +1326,9 @@ const MusicPartitioner = () => {
             onGoToLibrary={handleOpenLibrary}
             onAddDivider={addDivider}
             onExport={handleExport}
+            scoreRange={scoreRange}
+            onChangeScoreRange={handleChangeScoreRange}
+            pageCount={scoreMetadata?.page_count || 0}
             onToggleSelectHeader={() => { setIsSelectingHeader(!isSelectingHeader); setIsSelectingMarking(false); }}
             onToggleSelectMarking={() => { setIsSelectingMarking(!isSelectingMarking); setIsSelectingHeader(false); }}
             isRectSelecting={isRectSelecting}
@@ -1367,6 +1409,7 @@ const MusicPartitioner = () => {
             confirmedPages={confirmedPages}
             detectedPages={detectedPages}
             onGoToPage={goToPage}
+            isPageInRange={isPageInRange}
           />
 
           {/* Status info */}

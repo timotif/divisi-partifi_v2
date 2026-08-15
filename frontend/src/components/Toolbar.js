@@ -19,6 +19,9 @@ const Toolbar = ({
   onToggleAutoDetect,
   onForceRescan,
   isDetecting,
+  scoreRange,
+  onChangeScoreRange,
+  pageCount,
 }) => {
   const [rescanConfirm, setRescanConfirm] = useState(false);
 
@@ -28,6 +31,35 @@ const Toolbar = ({
         <h1 className="text-xl font-semibold text-gray-700">Divisi</h1>
 
         <div className="flex items-center gap-2">
+          {/* Score page range — pages outside are excluded from detection/export */}
+          {pageCount > 1 && scoreRange && (
+            <label className="flex items-center gap-1 text-xs text-gray-500 select-none mr-2">
+              <span>Score pages</span>
+              <input
+                type="number"
+                min={1}
+                max={pageCount}
+                value={scoreRange.from}
+                onChange={(e) => onChangeScoreRange('from', e.target.value)}
+                className="w-12 px-1 py-0.5 border border-gray-300 rounded text-center tabular-nums
+                           focus:outline-none focus:ring-1 focus:ring-accent"
+                title="First page of the score"
+              />
+              <span>to</span>
+              <input
+                type="number"
+                min={1}
+                max={pageCount}
+                value={scoreRange.to}
+                onChange={(e) => onChangeScoreRange('to', e.target.value)}
+                className="w-12 px-1 py-0.5 border border-gray-300 rounded text-center tabular-nums
+                           focus:outline-none focus:ring-1 focus:ring-accent"
+                title="Last page of the score"
+              />
+              <span className="text-gray-400">of {pageCount}</span>
+            </label>
+          )}
+
           {/* Auto-detect toggle */}
           <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mr-2">
             <button
