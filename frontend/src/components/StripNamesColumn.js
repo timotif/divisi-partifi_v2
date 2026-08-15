@@ -1,16 +1,11 @@
 import { pickGhostCompletion } from '../utils/stripNameSuggest';
 
-// Shared font/box metrics between the ghost overlay and the real input so
-// typed text and ghost text stay pixel-aligned. Must mirror the input's
-// className below (text-sm font-medium, px-3 py-1.5, border-none).
-const FIELD_STYLE = {
-  fontSize: '0.875rem',      // text-sm
-  fontWeight: 500,           // font-medium
-  lineHeight: '1.25rem',
-  padding: '0.375rem 0.75rem', // py-1.5 px-3
-  border: '1px solid transparent',
-  boxSizing: 'border-box',
-};
+// The ghost layer and the input must render text identically or the ghost
+// drifts out of alignment -- Inter is a proportional webfont, so even a small
+// metric mismatch is visible. Both use this exact class list, and the ghost
+// re-renders the typed prefix transparently so the browser itself positions
+// the remainder in normal inline flow rather than us computing an offset.
+const FIELD_TEXT = 'w-full px-3 py-1.5 rounded-md text-sm font-medium border-none';
 
 const StripNamesColumn = ({
   strips,
@@ -77,15 +72,16 @@ const StripNamesColumn = ({
               width: '100%'
             }}
           >
-            <div className="relative w-full">
+            {/* The accent background lives on the wrapper, so the input can be
+                transparent over the ghost without the field losing its look. */}
+            <div className="relative w-full rounded-md bg-accent focus-within:bg-accent/80 focus-within:ring-2 focus-within:ring-accent/40">
               {ghost && (
                 <div
                   aria-hidden="true"
-                  className="absolute inset-0 rounded-md whitespace-pre overflow-hidden pointer-events-none"
-                  style={FIELD_STYLE}
+                  className={`absolute inset-0 whitespace-pre overflow-hidden pointer-events-none ${FIELD_TEXT}`}
                 >
-                  <span style={{ color: 'transparent' }}>{value}</span>
-                  <span className="text-gray-400">{ghost.slice(value.length)}</span>
+                  <span className="invisible">{value}</span>
+                  <span className="text-white/50">{ghost.slice(value.length)}</span>
                 </div>
               )}
               <input
@@ -94,8 +90,10 @@ const StripNamesColumn = ({
                 onChange={(e) => onUpdateName(index, e.target.value)}
                 onBlur={() => onBlurName(index)}
                 onKeyDown={(e) => handleKeyDown(index, e)}
-                className="relative w-full bg-accent text-white px-3 py-1.5 rounded-md text-sm font-medium border-none outline-none focus:bg-accent/80 focus:ring-2 focus:ring-accent/40"
-                style={{ cursor: 'text', backgroundColor: ghost ? 'transparent' : undefined }}
+                spellCheck="false"
+                autoComplete="off"
+                className={`relative bg-transparent text-white placeholder-white/50 outline-none ${FIELD_TEXT}`}
+                style={{ cursor: 'text' }}
                 onClick={(e) => e.stopPropagation()}
                 placeholder={suggestion || `Part ${partNumbers[index]}`}
               />
