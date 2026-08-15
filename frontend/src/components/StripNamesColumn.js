@@ -84,7 +84,9 @@ const StripNamesColumn = ({ strips, stripNames, sequence, pageHeight, onUpdateNa
                 className={`relative bg-transparent text-white outline-none ${FIELD_TEXT}`}
                 style={{ cursor: 'text' }}
                 onClick={(e) => e.stopPropagation()}
-                placeholder={`Part ${partNumbers[index]}`}
+                // The ghost occupies the same origin as the placeholder, so
+                // showing both paints two strings over each other.
+                placeholder={ghost ? '' : `Part ${partNumbers[index]}`}
               />
             </div>
           </div>

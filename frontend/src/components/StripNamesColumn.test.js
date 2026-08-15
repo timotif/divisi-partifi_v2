@@ -39,6 +39,21 @@ describe('StripNamesColumn ghost text', () => {
     expect(screen.getByText('Vl1')).toBeInTheDocument();
   });
 
+  // Regression: the placeholder and the ghost share an origin, so leaving the
+  // placeholder set painted "Part 1" and "Vl1" on top of each other.
+  test('the placeholder gives way to the ghost', () => {
+    setup();
+    const input = screen.getAllByRole('textbox')[0];
+    expect(input).toHaveAttribute('placeholder', 'Part 1');
+
+    fireEvent.focus(input);
+    expect(screen.getByText('Vl1')).toBeInTheDocument();
+    expect(input).toHaveAttribute('placeholder', '');
+
+    fireEvent.blur(input);
+    expect(input).toHaveAttribute('placeholder', 'Part 1');
+  });
+
   // Regression: the ghost used to render the whole completion at inset-0, so
   // the typed prefix sat on top of the ghost's own copy of those characters
   // and the field read as garbled. The typed part must be reserved invisibly
