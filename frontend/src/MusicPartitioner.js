@@ -667,18 +667,23 @@ const MusicPartitioner = () => {
         const allDividers = { ...dividersByPage, [pageNum]: targetDividers };
         const allSysFlags = { ...systemDividersByPage, [pageNum]: targetSysFlags };
         const globalSeq = buildGlobalKnownSequence(prev, allDividers, allSysFlags);
+        const existing = prev[pageNum] || [];
         let filledNames;
         if (globalSeq.length > 0 && pageStrips.length > 0) {
-          filledNames = fillPageNames(prev[pageNum] || [], pageStrips, globalSeq);
+          filledNames = fillPageNames(existing, pageStrips, globalSeq);
         } else {
-          const latestNames = getLatestConfirmedStripNames(pageNum);
-          filledNames = [...latestNames];
+          // Propagated names only fill gaps -- they come from a different page
+          // and must never overwrite what the user typed on this one.
+          filledNames = [...existing];
+          getLatestConfirmedStripNames(pageNum).forEach((n, i) => {
+            if (!filledNames[i]) filledNames[i] = n;
+          });
         }
 
-        return {
-          ...prev,
-          [pageNum]: prev[pageNum]?.length ? prev[pageNum] : filledNames,
-        };
+        // filledNames already preserves existing names and fills only gaps, so
+        // it supersedes what is there. Discarding it whenever the page had any
+        // name was what left partly-named pages permanently incomplete.
+        return { ...prev, [pageNum]: filledNames };
       });
     }
 
@@ -765,8 +770,12 @@ const MusicPartitioner = () => {
       });
       // Auto-fill strip names from the global known sequence
       setStripNamesByPage(prev => {
-        if (prev[pageNum]?.length > 0) return prev;
         const pageStrips = deriveStrips(dividers, data.system_flags);
+        // Fill only the gaps. Bailing out when the page had any name left the
+        // rest of it blank forever: one auto-filled or ghost-accepted strip
+        // was enough to make the page look finished.
+        const existing = prev[pageNum] || [];
+        if (pageStrips.length > 0 && pageStrips.every((_, i) => existing[i])) return prev;
         // Overlay this page's freshly detected geometry onto the closure
         // snapshot before voting: during a sequential rescan, dividersByPage
         // is the value captured when this callback was built and does not yet
@@ -775,9 +784,13 @@ const MusicPartitioner = () => {
         const allSysFlags = { ...systemDividersByPage, [pageNum]: data.system_flags };
         const globalSeq = buildGlobalKnownSequence(prev, allDividers, allSysFlags);
         if (globalSeq.length > 0 && pageStrips.length > 0) {
-          return { ...prev, [pageNum]: fillPageNames([], pageStrips, globalSeq) };
+          return { ...prev, [pageNum]: fillPageNames(existing, pageStrips, globalSeq) };
         }
-        return { ...prev, [pageNum]: data.strip_names };
+        // No sequence to apply yet: keep whatever the user already has and
+        // only take the backend's names for strips that are still empty.
+        const merged = [...existing];
+        (data.strip_names || []).forEach((n, i) => { if (!merged[i]) merged[i] = n; });
+        return { ...prev, [pageNum]: merged };
       });
       // OCR-suggested names: backend field may not exist yet.
       setSuggestedNamesByPage(prev => ({ ...prev, [pageNum]: data.suggested_names || [] }));
