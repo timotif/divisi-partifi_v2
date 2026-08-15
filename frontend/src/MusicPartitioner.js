@@ -58,6 +58,8 @@ const MusicPartitioner = () => {
   // Score page range (1-indexed, inclusive) — pages outside it are front matter,
   // blanks, or pre-extracted parts and are excluded from detection and export.
   const [scoreRange, setScoreRange] = useState({ from: 1, to: 1 });
+  // { done, total } while a whole-document rescan runs; null otherwise.
+  const [rescanProgress, setRescanProgress] = useState(null);
   const [detectedPages, setDetectedPages] = useState(new Set());
   const [detectingPage, setDetectingPage] = useState(null); // page number or null
   const [detectionWarnings, setDetectionWarnings] = useState({});
@@ -668,11 +670,15 @@ const MusicPartitioner = () => {
   }, [scoreMetadata, scoreId, confirmedPages, autoDetect, getLatestConfirmedDividers, getLatestConfirmedStripNames, getLatestConfirmedSystemDividers, dividersByPage, systemDividersByPage, deriveStrips, buildGlobalKnownSequence, fillPageNames]);
 
   // --- Staff detection ---
-  const detectStavesForPage = useCallback(async (pageNum) => {
-    // Skip if already detected, already confirmed, currently detecting, or dividers present
-    if (detectedPages.has(pageNum) || confirmedPages.has(pageNum)) return;
-    if (detectingPage !== null) return;
-    if (dividersByPage[pageNum]?.length > 0) return;
+  // `force` bypasses the skip guards: used by "Rescan all", which has already
+  // cleared page state and drives pages sequentially itself.
+  const detectStavesForPage = useCallback(async (pageNum, force = false) => {
+    if (!force) {
+      // Skip if already detected, already confirmed, currently detecting, or dividers present
+      if (detectedPages.has(pageNum) || confirmedPages.has(pageNum)) return;
+      if (detectingPage !== null) return;
+      if (dividersByPage[pageNum]?.length > 0) return;
+    }
 
     setDetectingPage(pageNum);
 
@@ -787,6 +793,58 @@ const MusicPartitioner = () => {
     setConfirmedPages(prev => { const s = new Set(prev); s.delete(p); return s; });
     // Detection re-triggers automatically via the useEffect above once state is cleared
   }, [currentPage]);
+
+  // Clear every divider on the current page without re-running detection.
+  // Marks the page as "detected" so the auto-detect effect does not immediately
+  // repopulate it — the user asked for an empty page, so leave it empty.
+  const clearPageDividers = useCallback(() => {
+    const p = currentPage;
+    pushUndo(p);
+    setDividersByPage(prev => ({ ...prev, [p]: [] }));
+    setSystemDividersByPage(prev => ({ ...prev, [p]: [] }));
+    setSnapFlagsByPage(prev => ({ ...prev, [p]: [] }));
+    setStripNamesByPage(prev => ({ ...prev, [p]: [] }));
+    setDetectionWarnings(prev => { const n = { ...prev }; delete n[p]; return n; });
+    setDetectedPages(prev => new Set(prev).add(p));
+  }, [currentPage, pushUndo]);
+
+  // Re-run detection across every page in the score range, sequentially.
+  // Detection is serialized backend-side (one in-flight request at a time), so
+  // pages are awaited one by one rather than fired in parallel.
+  const rescanAllPages = useCallback(async () => {
+    if (!scoreMetadata || !scoreId) return;
+    const from = scoreRange.from - 1;
+    const to = scoreRange.to - 1;
+
+    // Clear state for the whole range up front so detection is not skipped by
+    // the "already detected / dividers present" guards in detectStavesForPage.
+    const cleared = {};
+    for (let i = from; i <= to; i++) cleared[i] = [];
+    setDividersByPage(prev => ({ ...prev, ...cleared }));
+    setSystemDividersByPage(prev => ({ ...prev, ...cleared }));
+    setSnapFlagsByPage(prev => ({ ...prev, ...cleared }));
+    setStripNamesByPage(prev => ({ ...prev, ...cleared }));
+    setDetectionWarnings({});
+    setDetectedPages(prev => {
+      const s = new Set(prev);
+      for (let i = from; i <= to; i++) s.delete(i);
+      return s;
+    });
+    setConfirmedPages(prev => {
+      const s = new Set(prev);
+      for (let i = from; i <= to; i++) s.delete(i);
+      return s;
+    });
+    undoStackRef.current = [];
+
+    setRescanProgress({ done: 0, total: to - from + 1 });
+    for (let i = from; i <= to; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await detectStavesForPage(i, true);
+      setRescanProgress({ done: i - from + 1, total: to - from + 1 });
+    }
+    setRescanProgress(null);
+  }, [scoreMetadata, scoreId, scoreRange, detectStavesForPage]);
 
   // --- Divider management ---
   const addDividerAtY = (y, isSystem = false) => {
@@ -1329,6 +1387,9 @@ const MusicPartitioner = () => {
             scoreRange={scoreRange}
             onChangeScoreRange={handleChangeScoreRange}
             pageCount={scoreMetadata?.page_count || 0}
+            onRescanAll={rescanAllPages}
+            onClearPageDividers={clearPageDividers}
+            hasDividersOnPage={currentDividers.length > 0}
             onToggleSelectHeader={() => { setIsSelectingHeader(!isSelectingHeader); setIsSelectingMarking(false); }}
             onToggleSelectMarking={() => { setIsSelectingMarking(!isSelectingMarking); setIsSelectingHeader(false); }}
             isRectSelecting={isRectSelecting}
@@ -1341,7 +1402,8 @@ const MusicPartitioner = () => {
             autoDetect={autoDetect}
             onToggleAutoDetect={() => setAutoDetect(prev => !prev)}
             onForceRescan={forceRescanPage}
-            isDetecting={detectingPage === currentPage}
+            isDetecting={detectingPage !== null || rescanProgress !== null}
+            rescanProgress={rescanProgress}
           />
 
           {/* Error banner */}
