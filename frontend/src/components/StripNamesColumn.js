@@ -22,8 +22,9 @@ const StripNamesColumn = ({ strips, stripNames, sequence, pageHeight, onUpdateNa
     partNumbers.push(num);
   }
 
-  // Ghost only fires on the focused field, narrowing as the user types.
-  // See docs/design/2026-08-15-strip-name-suggestion-design.md.
+  // Ghost only fires on the focused field, narrowing as the user types. Since
+  // prefill fills every strip, in practice it appears where a field has been
+  // erased -- see docs/design/2026-08-16-strip-name-implementation-notes.md.
   const ghostFor = (index) => {
     if (index !== focusedIndex || !sequence || sequence.length === 0) return '';
     return resolveGhostName(stripNames, strips, sequence, index, stripNames[index] || '');
