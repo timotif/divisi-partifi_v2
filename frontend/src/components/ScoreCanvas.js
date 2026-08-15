@@ -1,5 +1,13 @@
 import { Trash2, X } from 'lucide-react';
 
+// Half-height of the invisible band around a divider line that accepts drags.
+// 6px keeps two dividers 12px apart individually targetable.
+const DIVIDER_GRAB_HALF = 6;
+
+// Vertical separation between a divider's handles and its line. Applied in
+// opposite directions per divider type so overlapping pairs stay distinguishable.
+const HANDLE_OFFSET = 9;
+
 const ScoreCanvas = ({
   pageWidth,
   pageHeight,
@@ -104,16 +112,37 @@ const ScoreCanvas = ({
           // null/undefined = manual divider (no snap attempted). Only false shows
           // the amber indicator.
           const unsnapped = snapFlags?.[index] === false;
+          // Static, unconditional offset: system handles ride above their line,
+          // part handles below. Between two systems the pair of boundaries can
+          // be ~10px apart; this pulls their handles apart without the offset
+          // ever depending on distance -- a distance-conditional stagger would
+          // make a handle jump sideways mid-drag as the gap closed.
+          const handleOffset = isSystem ? -HANDLE_OFFSET : HANDLE_OFFSET;
           return (
           <div key={index}>
             {/* Divider line */}
             <div
-              className={`absolute w-full z-10 ${
+              className={`absolute w-full z-10 pointer-events-none ${
                 isSystem ? 'border-t-[3px] border-system' : 'border-t-2 border-accent'
               }`}
               style={{ top: y }}
-              onMouseDown={(e) => e.stopPropagation()}
+            />
+            {/* Grab strip: the visible line is only 2-3px tall, too thin to hit
+                reliably. This invisible band makes the whole line draggable,
+                which matters most between systems where a part and a system
+                divider can sit ~10px apart and their handles overlap.
+                Split above/below the line so that when two dividers are closer
+                than 2*HALF the nearer one still wins on either side. */}
+            <div
+              className="absolute w-full cursor-ns-resize z-[15]"
+              style={{ top: y - DIVIDER_GRAB_HALF, height: DIVIDER_GRAB_HALF * 2 }}
+              onMouseDown={(e) => { e.stopPropagation(); onDividerMouseDown(e, index); }}
               onClick={(e) => e.stopPropagation()}
+              title={
+                isSystem
+                  ? 'System divider — drag to adjust'
+                  : 'Drag to adjust strip boundary'
+              }
             />
             {/* Unsnapped indicator: amber dashed overlay on the line */}
             {unsnapped && (
@@ -142,7 +171,7 @@ const ScoreCanvas = ({
                     : 'bg-accent hover:bg-accent/80'
               }`}
               style={{
-                top: y - 8,
+                top: y - 8 + handleOffset,
                 left: pageWidth - 20
               }}
               onMouseDown={(e) => { e.stopPropagation(); onDividerMouseDown(e, index); }}
@@ -163,7 +192,7 @@ const ScoreCanvas = ({
             <button
               className="absolute w-4 h-4 bg-gray-400 rounded-full cursor-pointer z-20 flex items-center justify-center hover:bg-danger transition-colors text-white"
               style={{
-                top: y - 8,
+                top: y - 8 + handleOffset,
                 left: pageWidth - 36
               }}
               onMouseDown={(e) => e.stopPropagation()}
