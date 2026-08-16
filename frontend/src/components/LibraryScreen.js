@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { BookOpen, Trash2, FolderOpen, ChevronDown, ChevronRight, Upload, Pencil, UserRound } from 'lucide-react';
+import { BookOpen, Trash2, FolderOpen, ChevronDown, ChevronRight, Upload, Pencil, UserRound, ArrowLeft, Search, X } from 'lucide-react';
 import ComposerModal from './ComposerModal';
 import ScoreModal from './ScoreModal';
+import { filterScores, filterComposers } from '../utils/libraryFilter';
 
 // Format a Unix timestamp as a human-readable relative string.
 function formatRelative(ts) {
@@ -190,7 +191,7 @@ function ScoreCard({ score, onRestore, onDelete, onUpdate }) {
 // Composers tab
 // ---------------------------------------------------------------------------
 
-function ComposersTab() {
+function ComposersTab({ query = '' }) {
   const [composers, setComposers] = useState([]);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState(null);
@@ -227,10 +228,16 @@ function ComposersTab() {
     <div className="p-3 bg-red-50 border border-red-200 rounded-md text-sm text-danger">{error}</div>
   );
 
+  const visible = filterComposers(composers, query);
+
   return (
     <>
       <div className="flex items-center justify-between mb-4">
-        <p className="text-xs text-gray-400">{composers.length} composer{composers.length !== 1 ? 's' : ''}</p>
+        <p className="text-xs text-gray-400">
+          {query
+            ? `${visible.length} of ${composers.length} composer${composers.length !== 1 ? 's' : ''}`
+            : `${composers.length} composer${composers.length !== 1 ? 's' : ''}`}
+        </p>
         <button
           onClick={() => setCreating(true)}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded text-xs hover:bg-accent/80 transition-colors"
@@ -246,9 +253,14 @@ function ComposersTab() {
           <p className="text-sm">No composers yet.</p>
           <p className="text-xs mt-1">They're added automatically when you upload a score.</p>
         </div>
+      ) : visible.length === 0 ? (
+        <div className="text-center text-gray-400 py-12">
+          <Search className="w-10 h-10 mx-auto mb-3 text-gray-200" />
+          <p className="text-sm">No composers match “{query}”.</p>
+        </div>
       ) : (
         <div className="divide-y divide-surface-border">
-          {composers.map(c => (
+          {visible.map(c => (
             <div key={c.composer_id} className="flex items-center justify-between py-2.5 gap-3">
               <div className="min-w-0">
                 <span className="text-sm text-gray-800">
@@ -298,13 +310,27 @@ function ComposersTab() {
 // Library screen — top level
 // ---------------------------------------------------------------------------
 
-const LibraryScreen = ({ scores, loading, error, onRestore, onDelete, onUpdate, onUpload }) => {
+const LibraryScreen = ({ scores, loading, error, onRestore, onDelete, onUpdate, onUpload, onBack }) => {
   const [tab, setTab] = useState('scores'); // 'scores' | 'composers'
+  const [query, setQuery] = useState('');
+
+  const visibleScores = filterScores(scores, query);
 
   return (
     <div className="p-6 bg-surface-bg min-h-screen">
       <div className="max-w-2xl mx-auto">
         <div className="bg-surface-card rounded-md shadow-sm border border-surface-border p-6">
+          {/* Return to wherever the library was opened from — it is otherwise a dead end */}
+          {onBack && (
+            <button
+              onClick={onBack}
+              className="inline-flex items-center gap-1.5 mb-4 text-sm text-gray-500 hover:text-accent transition-colors"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              Back
+            </button>
+          )}
+
           {/* Header */}
           <div className="flex items-center justify-between mb-5">
             <div className="flex items-center gap-2">
@@ -328,7 +354,7 @@ const LibraryScreen = ({ scores, loading, error, onRestore, onDelete, onUpdate, 
             ].map(t => (
               <button
                 key={t.id}
-                onClick={() => setTab(t.id)}
+                onClick={() => { setTab(t.id); setQuery(''); }}
                 className={[
                   'px-4 py-2 text-sm -mb-px border-b-2 transition-colors',
                   tab === t.id
@@ -340,6 +366,32 @@ const LibraryScreen = ({ scores, loading, error, onRestore, onDelete, onUpdate, 
               </button>
             ))}
           </div>
+
+          {/* Search / filter. Hidden on an empty score list — there is nothing
+              to search, and the empty state says so more usefully. */}
+          {!(tab === 'scores' && !loading && scores.length === 0) && (
+          <div className="relative mb-4">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-300 pointer-events-none" />
+            <input
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              onKeyDown={e => e.key === 'Escape' && setQuery('')}
+              placeholder={tab === 'scores' ? 'Search by title or composer…' : 'Search composers…'}
+              aria-label={tab === 'scores' ? 'Search scores' : 'Search composers'}
+              className="w-full pl-9 pr-9 py-2 text-sm border border-surface-border rounded-md bg-white text-gray-700 placeholder:text-gray-400 focus:outline-none focus:border-accent transition-colors"
+            />
+            {query && (
+              <button
+                onClick={() => setQuery('')}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-300 hover:text-gray-600 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+          )}
 
           {/* Tab content */}
           {tab === 'scores' && (
@@ -357,9 +409,14 @@ const LibraryScreen = ({ scores, loading, error, onRestore, onDelete, onUpdate, 
                   <p className="text-sm">No scores saved yet.</p>
                   <p className="text-xs mt-1">Upload a PDF score to get started.</p>
                 </div>
+              ) : visibleScores.length === 0 ? (
+                <div className="text-center text-gray-400 py-12">
+                  <Search className="w-10 h-10 mx-auto mb-3 text-gray-200" />
+                  <p className="text-sm">No scores match “{query}”.</p>
+                </div>
               ) : (
                 <div className="space-y-3">
-                  {scores.map(score => (
+                  {visibleScores.map(score => (
                     <ScoreCard
                       key={score.score_id}
                       score={score}
@@ -373,7 +430,7 @@ const LibraryScreen = ({ scores, loading, error, onRestore, onDelete, onUpdate, 
             </>
           )}
 
-          {tab === 'composers' && <ComposersTab />}
+          {tab === 'composers' && <ComposersTab query={query} />}
         </div>
       </div>
     </div>
