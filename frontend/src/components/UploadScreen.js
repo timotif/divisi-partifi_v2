@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { Upload, BookOpen } from 'lucide-react';
 import TitleInput from './TitleInput';
 import ComposerInput from './ComposerInput';
+import Changelog from './Changelog';
 
 const UploadScreen = ({ onUpload, uploading, error, onOpenLibrary }) => {
   const fileInputRef = useRef(null);
@@ -18,8 +19,8 @@ const UploadScreen = ({ onUpload, uploading, error, onOpenLibrary }) => {
 
   return (
     <div className="p-6 bg-surface-bg min-h-screen">
-      <div className="max-w-2xl mx-auto">
-        <div className="bg-surface-card rounded-md shadow-sm border border-surface-border p-6">
+      <div className="max-w-5xl mx-auto flex flex-col lg:flex-row gap-6 lg:items-start">
+        <div className="flex-1 bg-surface-card rounded-md shadow-sm border border-surface-border p-6">
           <h1 className="text-xl font-semibold text-gray-700 mb-8">Divisi</h1>
 
           <div className="space-y-3 mb-6">
@@ -63,6 +64,8 @@ const UploadScreen = ({ onUpload, uploading, error, onOpenLibrary }) => {
             </div>
           )}
         </div>
+
+        <Changelog />
       </div>
     </div>
   );
