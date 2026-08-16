@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 import os
 import io
 import uuid
@@ -10,7 +11,7 @@ from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
 from analyzer import (
 	Score, Staff, Part, TMP_DIR,
-	sanitize_string, sanitize_url, PageError, StaffError, PartError
+	sanitize_string, sanitize_url, sanitize_version_name, PageError, StaffError, PartError
 )
 from detection.projection import detect_staves
 from detection.dividers import staves_to_dividers
@@ -62,6 +63,10 @@ def bad_request(e):
 @app.errorhandler(404)
 def not_found(e):
 	return jsonify({"error": str(e.description)}), 404
+
+@app.errorhandler(409)
+def conflict(e):
+	return jsonify({"error": str(e.description)}), 409
 
 @app.errorhandler(413)
 def too_large(e):
@@ -673,6 +678,7 @@ def generate_parts(score_id: str):
 
 	Expects JSON:
 	{
+	  "version_name": "v2",     // optional, for provenance only
 	  "parts": {
 	    "Violin I": {
 	      "spacing_mm": 10,
@@ -684,6 +690,10 @@ def generate_parts(score_id: str):
 
 	After rendering, caches the generated PDFs to disk and records them
 	in the database so they survive server restarts.
+
+	A score keeps one set of parts: generating replaces it wholesale.
+	*version_name* records which setup version produced the current set, so
+	the library can say where the PDFs on disk came from.
 	"""
 	entry = _validate_score_id(score_id)
 	score = entry["score"]
@@ -748,7 +758,8 @@ def generate_parts(score_id: str):
 			"staves_count": len(part.staves),
 		})
 
-	db.save_generated_parts(score_id, saved_parts)
+	gen_version = sanitize_version_name(data.get('version_name')) or 'Default'
+	db.save_generated_parts(score_id, saved_parts, gen_version)
 
 	return jsonify({
 		"parts": [
@@ -841,12 +852,29 @@ def save_setup(score_id: str):
 	if setup_dict is None:
 		abort(400, description="Missing 'setup' in request body")
 
-	version_name = sanitize_string(data.get('version_name') or 'Default') or 'Default'
+	raw_name = data.get('version_name')
+	if raw_name is None:
+		version_name = 'Default'
+	else:
+		version_name = sanitize_version_name(raw_name)
+		# No fallback to 'Default': that would silently overwrite an unrelated
+		# version whenever a name normalized away entirely (e.g. "♥").
+		if not version_name:
+			abort(400, description="Version name must contain at least one printable character")
 
-	setup_id = db.save_setup(score_id, version_name, display_width, setup_dict)
+	# Save-as sets create_new so an existing name is a conflict rather than an
+	# overwrite. Autosave leaves it unset and keeps upserting into its target.
+	create_new = bool(data.get('create_new'))
+	try:
+		setup_id = db.save_setup(score_id, version_name, display_width, setup_dict, create_new)
+	except sqlite3.IntegrityError:
+		abort(409, description=f"A version named '{version_name}' already exists")
 	db.touch_score(score_id)
 
-	return jsonify({"saved": True, "setup_id": setup_id})
+	# The client adopts version_name as its autosave target: it may differ from
+	# what was typed, and autosaving to a name the server never stored would
+	# create a second version on the next keystroke.
+	return jsonify({"saved": True, "setup_id": setup_id, "version_name": version_name})
 
 
 @app.route('/api/scores/<score_id>/setup', methods=['GET'])
@@ -1195,6 +1223,10 @@ def list_library():
 			"updated_at":     row["updated_at"],
 			"setup_versions": [v["version_name"] for v in versions],
 			"generated_parts": [r["part_name"] for r in gen_parts],
+			# Which setup version produced the parts currently on disk. All
+			# rows share it (generating replaces the whole set), so the first
+			# row speaks for all of them.
+			"parts_from_version": gen_parts[0]["version_name"] if gen_parts else None,
 		})
 
 	return jsonify({"scores": result})

@@ -128,5 +128,9 @@ backend/requirements.txt
 *.rar
 *.tar
 *.zip
-# Design/brainstorming docs: local working notes, not part of the repo
-docs/design/
+# Local working notes: design/brainstorming docs, agent skill config
+# (issue tracker, triage labels, domain docs), ADRs. Never committed.
+docs/
+
+# Domain glossary — lives at the root, so not covered by docs/ above
+CONTEXT.md

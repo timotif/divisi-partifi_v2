@@ -89,9 +89,13 @@ CREATE TABLE IF NOT EXISTS setups (
     UNIQUE (score_id, version_name)
 );
 
+-- One set of parts per score: generating replaces the whole set.
+-- version_name records which setup version produced it, so the library can
+-- say where the current PDFs came from. It is provenance, not a scope key.
 CREATE TABLE IF NOT EXISTS generated_parts (
     score_id        TEXT NOT NULL REFERENCES scores(score_id) ON DELETE CASCADE,
     part_name       TEXT NOT NULL,
+    version_name    TEXT NOT NULL DEFAULT 'Default',
     page_count      INTEGER NOT NULL,
     staves_count    INTEGER NOT NULL,
     generated_at    REAL NOT NULL,
@@ -129,7 +133,30 @@ def init_db() -> None:
     os.makedirs(PARTS_DIR, exist_ok=True)
     with get_conn() as conn:
         conn.executescript(_DDL)
+        _migrate(conn)
     logger.info("DB initialised at %s (pid %d)", DB_PATH, os.getpid())
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing database up to the current schema.
+
+    CREATE TABLE IF NOT EXISTS leaves already-created tables alone, so schema
+    changes need explicit handling here.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(generated_parts)")}
+
+    # generated_parts gained version_name: parts belong to the setup version
+    # that produced them, not to the score. Before this, generating from one
+    # version deleted every other version's PDFs.
+    if cols and "version_name" not in cols:
+        logger.info("Migrating generated_parts: adding version_name")
+        # Provenance only — which version produced the current set of parts.
+        # A score still keeps exactly one set (generating replaces it), so this
+        # is not a scope key and the primary key is unchanged. Existing rows
+        # predate versioning and are left in place, labelled 'Default'.
+        conn.execute(
+            "ALTER TABLE generated_parts ADD COLUMN version_name TEXT NOT NULL DEFAULT 'Default'"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -217,19 +244,31 @@ def save_setup(
     version_name: str,
     display_width: int,
     setup_dict: dict,
+    create_new: bool = False,
 ) -> int:
-    """Insert or replace a named setup version.  Returns the setup_id."""
+    """Insert or replace a named setup version.  Returns the setup_id.
+
+    With create_new=True the name must be free: an existing one raises
+    sqlite3.IntegrityError instead of being overwritten.  The UNIQUE
+    constraint does the rejecting, so concurrent save-as calls cannot both
+    pass a check-then-write.
+    """
     now = time.time()
-    with get_conn() as conn:
-        cur = conn.execute(
-            """
+    upsert = """
             INSERT INTO setups (score_id, version_name, display_width, setup_json, saved_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(score_id, version_name) DO UPDATE SET
                 display_width = excluded.display_width,
                 setup_json    = excluded.setup_json,
                 saved_at      = excluded.saved_at
-            """,
+            """
+    insert_only = """
+            INSERT INTO setups (score_id, version_name, display_width, setup_json, saved_at)
+            VALUES (?, ?, ?, ?, ?)
+            """
+    with get_conn() as conn:
+        cur = conn.execute(
+            insert_only if create_new else upsert,
             (score_id, version_name, display_width, json.dumps(setup_dict), now),
         )
         # Retrieve the setup_id (INSERT OR UPDATE does not return lastrowid reliably)
@@ -302,8 +341,15 @@ def rename_setup(score_id: str, old_name: str, new_name: str) -> bool:
 # generated_parts table
 # ---------------------------------------------------------------------------
 
-def save_generated_parts(score_id: str, parts_list: list[dict]) -> None:
+def save_generated_parts(
+    score_id: str,
+    parts_list: list[dict],
+    version_name: str = 'Default',
+) -> None:
     """Replace all generated-part rows for a score.
+
+    A score keeps one set of parts; *version_name* records which setup version
+    produced it.
 
     *parts_list* entries must have keys: name (str), page_count (int),
     staves_count (int).
@@ -316,11 +362,12 @@ def save_generated_parts(score_id: str, parts_list: list[dict]) -> None:
         conn.executemany(
             """
             INSERT INTO generated_parts
-                (score_id, part_name, page_count, staves_count, generated_at)
-            VALUES (?, ?, ?, ?, ?)
+                (score_id, part_name, version_name, page_count, staves_count, generated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             [
-                (score_id, p["name"], p["page_count"], p["staves_count"], now)
+                (score_id, p["name"], version_name,
+                 p["page_count"], p["staves_count"], now)
                 for p in parts_list
             ],
         )

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Download, Plus, Upload, Type, Clock, BookOpen, RefreshCw, Eraser } from 'lucide-react';
+import { Download, Plus, Upload, Type, Clock, BookOpen, RefreshCw, Eraser, GitBranch } from 'lucide-react';
 
 const Toolbar = ({
   onNewScore,
@@ -26,6 +26,10 @@ const Toolbar = ({
   onClearPageDividers,
   hasDividersOnPage,
   rescanProgress,
+  activeVersion,
+  versions = [],
+  onSwitchVersion,
+  onStartNewVersion,
 }) => {
 
   // Confirm state for destructive page actions:
@@ -50,9 +54,44 @@ const Toolbar = ({
     <div className="mb-6">
       {/* Row 1 — identity + document-level actions */}
       <div className="flex items-center justify-between gap-4">
-        <h1 className="text-xl font-semibold text-gray-700 shrink-0">Divisi</h1>
+        <div className="flex items-center gap-2 shrink-0 min-w-0">
+          <h1 className="text-xl font-semibold text-gray-700">Divisi</h1>
+          {activeVersion && (
+            // More than one version: a selector to switch between them.
+            // Only one: a plain label, since there is nothing to pick.
+            versions.length > 1 ? (
+              <select
+                value={activeVersion}
+                onChange={(e) => onSwitchVersion?.(e.target.value)}
+                className="text-xs border border-surface-border rounded px-1.5 py-1 text-gray-600 bg-white max-w-[160px]"
+                title="Switch version — your edits are saving into the one selected"
+              >
+                {versions.map(v => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+            ) : (
+              <span
+                className="text-xs text-gray-500 truncate"
+                title={`Your edits are saving into "${activeVersion}"`}
+              >
+                {activeVersion}
+              </span>
+            )
+          )}
+        </div>
 
         <div className="flex items-center gap-2">
+          {onStartNewVersion && (
+            <button
+              onClick={onStartNewVersion}
+              className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200 transition-colors text-sm"
+              title="Split off a new version here — edits up to now stay in the current one"
+            >
+              <GitBranch className="w-4 h-4" />
+              Start new version…
+            </button>
+          )}
           <button
             onClick={onGoToLibrary}
             className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200 transition-colors text-sm"
