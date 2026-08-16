@@ -678,6 +678,7 @@ def generate_parts(score_id: str):
 
 	Expects JSON:
 	{
+	  "version_name": "v2",     // optional, for provenance only
 	  "parts": {
 	    "Violin I": {
 	      "spacing_mm": 10,
@@ -689,6 +690,10 @@ def generate_parts(score_id: str):
 
 	After rendering, caches the generated PDFs to disk and records them
 	in the database so they survive server restarts.
+
+	A score keeps one set of parts: generating replaces it wholesale.
+	*version_name* records which setup version produced the current set, so
+	the library can say where the PDFs on disk came from.
 	"""
 	entry = _validate_score_id(score_id)
 	score = entry["score"]
@@ -753,7 +758,8 @@ def generate_parts(score_id: str):
 			"staves_count": len(part.staves),
 		})
 
-	db.save_generated_parts(score_id, saved_parts)
+	gen_version = sanitize_version_name(data.get('version_name')) or 'Default'
+	db.save_generated_parts(score_id, saved_parts, gen_version)
 
 	return jsonify({
 		"parts": [
@@ -1217,6 +1223,10 @@ def list_library():
 			"updated_at":     row["updated_at"],
 			"setup_versions": [v["version_name"] for v in versions],
 			"generated_parts": [r["part_name"] for r in gen_parts],
+			# Which setup version produced the parts currently on disk. All
+			# rows share it (generating replaces the whole set), so the first
+			# row speaks for all of them.
+			"parts_from_version": gen_parts[0]["version_name"] if gen_parts else None,
 		})
 
 	return jsonify({"scores": result})

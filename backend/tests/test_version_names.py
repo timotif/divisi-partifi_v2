@@ -85,3 +85,65 @@ class TestSaveAs:
         second = dbmod.save_setup(SCORE_ID, "v2", 600, {"n": 2})
         assert first == second
         assert dbmod.load_setup(SCORE_ID, "v2")["setup"] == {"n": 2}
+
+
+class TestGeneratedPartsMigration:
+    """generated_parts gained version_name after databases already existed."""
+
+    OLD_SCHEMA = """
+        CREATE TABLE generated_parts (
+            score_id     TEXT NOT NULL,
+            part_name    TEXT NOT NULL,
+            page_count   INTEGER NOT NULL,
+            staves_count INTEGER NOT NULL,
+            generated_at REAL NOT NULL,
+            PRIMARY KEY (score_id, part_name)
+        );
+    """
+
+    def _old_db(self):
+        """Replace the current table with the pre-migration one, plus a row."""
+        with dbmod.get_conn() as conn:
+            conn.executescript("DROP TABLE generated_parts;" + self.OLD_SCHEMA)
+            conn.execute(
+                "INSERT INTO generated_parts VALUES (?, ?, ?, ?, ?)",
+                (SCORE_ID, "Violin I", 2, 4, 123.0),
+            )
+
+    def test_adds_column_and_keeps_existing_rows(self):
+        _score()
+        self._old_db()
+        dbmod.init_db()
+
+        rows = dbmod.get_generated_parts(SCORE_ID)
+        assert len(rows) == 1, "existing parts must survive the migration"
+        assert rows[0]["version_name"] == "Default"
+        assert rows[0]["part_name"] == "Violin I"
+
+    def test_is_idempotent(self):
+        """init_db runs on every startup; a second pass must not error."""
+        _score()
+        self._old_db()
+        dbmod.init_db()
+        dbmod.init_db()
+        assert len(dbmod.get_generated_parts(SCORE_ID)) == 1
+
+    def test_records_the_generating_version(self):
+        _score()
+        dbmod.save_generated_parts(
+            SCORE_ID, [{"name": "Vln", "page_count": 1, "staves_count": 2}], "v2",
+        )
+        assert dbmod.get_generated_parts(SCORE_ID)[0]["version_name"] == "v2"
+
+    def test_generating_replaces_the_whole_set(self):
+        """One set per score: generating from another version supersedes it."""
+        _score()
+        dbmod.save_generated_parts(
+            SCORE_ID, [{"name": "Vln", "page_count": 1, "staves_count": 2}], "Default",
+        )
+        dbmod.save_generated_parts(
+            SCORE_ID, [{"name": "Vla", "page_count": 1, "staves_count": 2}], "v2",
+        )
+        rows = dbmod.get_generated_parts(SCORE_ID)
+        assert [r["part_name"] for r in rows] == ["Vla"]
+        assert rows[0]["version_name"] == "v2"

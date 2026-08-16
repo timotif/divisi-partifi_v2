@@ -1,8 +1,29 @@
 import { useState, useEffect } from 'react';
-import { BookOpen, Trash2, FolderOpen, ChevronDown, ChevronRight, Upload, Pencil, UserRound, ArrowLeft, Search, X } from 'lucide-react';
+import { BookOpen, Trash2, FolderOpen, ChevronDown, ChevronRight, Upload, Pencil, UserRound, ArrowLeft, Search, X, Download } from 'lucide-react';
 import ComposerModal from './ComposerModal';
 import ScoreModal from './ScoreModal';
 import { filterScores, filterComposers } from '../utils/libraryFilter';
+
+// Fetch a generated part as a blob and hand it to the browser as a download.
+// Same approach as ExportResults: a plain <a download> would navigate rather
+// than save, since the endpoint returns application/pdf.
+async function downloadPart(scoreId, partName) {
+  const res = await fetch(`/api/scores/${scoreId}/parts/${encodeURIComponent(partName)}`)
+    .catch(() => null);
+  if (!res || !res.ok) {
+    // The PDF is cached on disk and can go missing (storage cleared, score
+    // regenerated elsewhere). Say so rather than leaving a dead button.
+    window.alert(`Could not download "${partName}". Try regenerating the parts.`);
+    return;
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${partName}.pdf`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 // Format a Unix timestamp as a human-readable relative string.
 function formatRelative(ts) {
@@ -127,33 +148,44 @@ function ScoreCard({ score, onRestore, onDelete, onUpdate }) {
         </div>
       )}
 
-      {/* Expand / collapse extra details */}
-      {(hasVersions || hasGenerated) && (
+      {/* Expand / collapse extra details.
+          Versions are deliberately absent: the dropdown above already lists
+          them by name and can act on them, so naming them again as static
+          text was the same information with less to do. */}
+      {hasGenerated && (
         <button
           onClick={() => setExpanded(e => !e)}
           className="mt-2 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors"
         >
           {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-          {hasVersions && `${score.setup_versions.length} setup version${score.setup_versions.length !== 1 ? 's' : ''}`}
-          {hasVersions && hasGenerated && ' · '}
-          {hasGenerated && `${score.generated_parts.length} generated part${score.generated_parts.length !== 1 ? 's' : ''}`}
+          {`${score.generated_parts.length} generated part${score.generated_parts.length !== 1 ? 's' : ''}`}
         </button>
       )}
 
-      {expanded && (
-        <div className="mt-2 pl-4 border-l-2 border-surface-border text-xs text-gray-500 space-y-1">
-          {hasVersions && (
-            <p>
-              <span className="text-gray-400">Versions: </span>
-              {score.setup_versions.join(', ')}
+      {expanded && hasGenerated && (
+        <div className="mt-2 pl-4 border-l-2 border-surface-border text-xs text-gray-500 space-y-1.5">
+          {score.parts_from_version && (
+            // A score keeps one set of parts, so this says which version's
+            // layout the PDFs on disk actually reflect -- worth stating when
+            // it is not the version the dropdown is about to open.
+            <p className="text-gray-400">
+              Generated from <strong className="text-gray-500">{score.parts_from_version}</strong>
             </p>
           )}
-          {hasGenerated && (
-            <p>
-              <span className="text-gray-400">Parts: </span>
-              {score.generated_parts.join(', ')}
-            </p>
-          )}
+          <div className="flex flex-wrap gap-1.5">
+            {score.generated_parts.map(name => (
+              <button
+                key={name}
+                onClick={() => downloadPart(score.score_id, name)}
+                className="inline-flex items-center gap-1 px-2 py-1 border border-surface-border rounded
+                           text-gray-600 hover:bg-gray-50 hover:text-accent transition-colors"
+                title={`Download ${name}.pdf`}
+              >
+                <Download className="w-3 h-3" />
+                {name}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 

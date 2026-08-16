@@ -1408,7 +1408,12 @@ const MusicPartitioner = () => {
       const response = await fetch(`/api/scores/${scoreId}/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parts: partsPayload }),
+        // version_name is provenance: the score keeps one set of parts, and
+        // this records which version produced the set now on disk.
+        body: JSON.stringify({
+          parts: partsPayload,
+          version_name: autoSaveVersionName,
+        }),
       });
 
       if (!response.ok) {
