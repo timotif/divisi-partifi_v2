@@ -1,5 +1,6 @@
 import os
 import re
+import unicodedata
 import cv2
 import numpy as np
 import pymupdf as fitz
@@ -39,6 +40,31 @@ def sanitize_string(value: str) -> str:
 		return ""
 	value = value.replace('\x00', '').replace('/', '').replace('\\', '')
 	value = re.sub(r'[^\x20-\x7E]', '', value)
+	value = re.sub(r'\s+', ' ', value).strip()
+	return value[:128]
+
+
+def sanitize_version_name(value: str) -> str:
+	"""Normalize a setup version name for storage as a DB column value.
+
+	Deliberately NOT sanitize_string: version names are display labels that
+	never reach the filesystem, so filename-safety is the wrong tool — it
+	strips all non-ASCII and turns "Fauré – révision" into "Faur rvision".
+	See docs/adr/0002-version-names-do-not-use-sanitize-string.md.
+
+	Strips control characters, NFC-normalizes so visually identical names
+	collide predictably against UNIQUE (score_id, version_name), collapses
+	whitespace, and caps length. Returns "" when nothing legible remains —
+	callers must reject that rather than falling back to a default, since
+	the fallback would overwrite an unrelated version.
+	"""
+	if value is None:
+		return ""
+	# NFC first: composed and decomposed forms of the same name must land on
+	# the same bytes before they are compared or stored.
+	value = unicodedata.normalize('NFC', str(value))
+	# Cc/Cf = control and format chars (includes \x00 and bidi overrides).
+	value = ''.join(c for c in value if unicodedata.category(c) not in ('Cc', 'Cf'))
 	value = re.sub(r'\s+', ' ', value).strip()
 	return value[:128]
 

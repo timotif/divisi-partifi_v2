@@ -8,6 +8,7 @@ import ScoreCanvas from './components/ScoreCanvas';
 import AnnotationsPanel from './components/AnnotationsPanel';
 import LayoutPreview from './components/LayoutPreview';
 import LibraryScreen from './components/LibraryScreen';
+import NewVersionModal from './components/NewVersionModal';
 import { isPageInRange as isInRange, updateRange } from './utils/scoreRange';
 import {
   pickMostCommonSequence,
@@ -98,8 +99,10 @@ const MusicPartitioner = () => {
   // --- Duplicate upload modal ---
   const [duplicateInfo, setDuplicateInfo] = useState(null); // { score_id, title, composer, pendingFile }
 
-  // --- Auto-save version name (editable by user) ---
+  // --- Active setup version: the version autosave writes into ---
   const [autoSaveVersionName, setAutoSaveVersionName] = useState('Default');
+  const [knownVersions, setKnownVersions] = useState([]);
+  const [showNewVersionModal, setShowNewVersionModal] = useState(false);
 
   const containerRef = useRef(null);
 
@@ -365,25 +368,36 @@ const MusicPartitioner = () => {
     setConfirmedPages(prev => new Set(prev).add(currentPage));
   }, [currentPage]);
 
+  // Snapshot of every field a setup version stores. Save-as posts the same
+  // shape, so it lives here rather than being spelled out twice — a field
+  // added to one copy and not the other would go missing on save-as.
+  // useCallback so the autosave effect below can depend on it without
+  // rebuilding its timer on every render.
+  const buildSetupPayload = useCallback(() => ({
+    dividersByPage,
+    systemDividersByPage,
+    snapFlagsByPage,
+    stripNamesByPage,
+    confirmedPages: [...confirmedPages],
+    headerRegion,
+    markings,
+    spacingByPart,
+    offsetsByPart,
+    pageBreaksByPart: Object.fromEntries(
+      Object.entries(pageBreaksByPart).map(([k, v]) => [k, [...v]])
+    ),
+    scoreRange,
+  }), [
+    dividersByPage, systemDividersByPage, snapFlagsByPage, stripNamesByPage,
+    confirmedPages, headerRegion, markings, spacingByPart, offsetsByPart,
+    pageBreaksByPart, scoreRange,
+  ]);
+
   // --- Auto-save effect (debounced 2 seconds, fires during edit phase) ---
   useEffect(() => {
     if (!scoreId || phase !== 'edit') return;
     const timer = setTimeout(() => {
-      const setupPayload = {
-        dividersByPage,
-        systemDividersByPage,
-        snapFlagsByPage,
-        stripNamesByPage,
-        confirmedPages: [...confirmedPages],
-        headerRegion,
-        markings,
-        spacingByPart,
-        offsetsByPart,
-        pageBreaksByPart: Object.fromEntries(
-          Object.entries(pageBreaksByPart).map(([k, v]) => [k, [...v]])
-        ),
-        scoreRange,
-      };
+      const setupPayload = buildSetupPayload();
       fetch(`/api/scores/${scoreId}/setup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -392,15 +406,22 @@ const MusicPartitioner = () => {
           version_name: autoSaveVersionName,
           setup: setupPayload,
         }),
-      }).catch(err => console.warn('Auto-save failed:', err));
+      })
+        .then(res => (res.ok ? res.json() : null))
+        .then(data => {
+          // Adopt the server's canonical name: it normalizes on every write,
+          // and autosaving to a name it never stored would fork a second
+          // version on the next keystroke.
+          if (data?.version_name && data.version_name !== autoSaveVersionName) {
+            setAutoSaveVersionName(data.version_name);
+          }
+        })
+        .catch(err => console.warn('Auto-save failed:', err));
     }, 2000);
     return () => clearTimeout(timer);
-  }, [
-    scoreId, phase, pageWidth, autoSaveVersionName,
-    dividersByPage, systemDividersByPage, snapFlagsByPage,
-    stripNamesByPage, confirmedPages, headerRegion, markings,
-    spacingByPart, offsetsByPart, pageBreaksByPart, scoreRange,
-  ]);
+    // buildSetupPayload changes whenever any saved field changes, so it
+    // stands in for the individual state deps it closes over.
+  }, [scoreId, phase, pageWidth, autoSaveVersionName, buildSetupPayload]);
 
   // --- Helpers: reset all editor state ---
   const _resetEditorState = (pageCount) => {
@@ -487,6 +508,7 @@ const MusicPartitioner = () => {
       setCurrentPage(0);
       _resetEditorState(data.page_count);
       setAutoSaveVersionName('Default');
+      setKnownVersions(['Default']);
 
       setPageImageUrl(`/api/scores/${data.score_id}/pages/0`);
       setPhase('edit');
@@ -519,6 +541,46 @@ const MusicPartitioner = () => {
     }
   };
 
+  /**
+   * Save current work under a new version name and move the active version
+   * onto it (docs/adr/0001). Throws on failure so the modal can show why.
+   */
+  const handleStartNewVersion = async (newName) => {
+    const res = await fetch(`/api/scores/${scoreId}/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        display_width: pageWidth,
+        version_name: newName,
+        create_new: true,
+        setup: buildSetupPayload(),
+      }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(data?.error || `Save failed (${res.status})`);
+    }
+    // Adopt the stored name, not the typed one — see the ADR. Autosave now
+    // targets the new version and the original stops changing.
+    const canonical = data.version_name || newName;
+    setAutoSaveVersionName(canonical);
+    // Optimistic, so the selector lists the new version immediately; the
+    // authoritative list arrives with the next load.
+    setKnownVersions(prev => (prev.includes(canonical) ? prev : [...prev, canonical]));
+    setShowNewVersionModal(false);
+
+    // The score's first-ever save-as also creates the 'Default' row the
+    // selector needs, so refresh from the server rather than trusting the
+    // optimistic list.
+    fetch(`/api/scores/${scoreId}/setup?version=${encodeURIComponent(canonical)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (d?.versions) setKnownVersions(d.versions.map(v => v.version_name));
+      })
+      .catch(() => {});
+  };
+
+
   const handleRestoreScore = async (restoredScoreId, versionName = null) => {
     setError(null);
     try {
@@ -537,6 +599,7 @@ const MusicPartitioner = () => {
       setCurrentPage(0);
       _resetEditorState(pageCount);
       setAutoSaveVersionName(data.version_name || 'Default');
+      setKnownVersions((data.versions || []).map(v => v.version_name));
 
       if (data.setup) {
         const s = data.setup;
@@ -604,6 +667,31 @@ const MusicPartitioner = () => {
       setError(err.message);
       setPhase('upload');
     }
+  };
+
+  /**
+   * Switch the editor to another existing version of the same score.
+   *
+   * Flushes first: autosave is debounced 2s, so edits made just before the
+   * switch are still pending. Reloading would cancel that timer and then
+   * overwrite the state, losing them from the version they belong to.
+   */
+  const handleSwitchVersion = async (versionName) => {
+    if (!versionName || versionName === autoSaveVersionName) return;
+    try {
+      await fetch(`/api/scores/${scoreId}/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          display_width: pageWidth,
+          version_name: autoSaveVersionName,
+          setup: buildSetupPayload(),
+        }),
+      });
+    } catch (err) {
+      console.warn('Flush before version switch failed:', err);
+    }
+    await handleRestoreScore(scoreId, versionName);
   };
 
   const handleDeleteScore = async (delScoreId) => {
@@ -1456,6 +1544,10 @@ const MusicPartitioner = () => {
               setError(null);
             }}
             onGoToLibrary={handleOpenLibrary}
+            activeVersion={autoSaveVersionName}
+            versions={knownVersions}
+            onSwitchVersion={handleSwitchVersion}
+            onStartNewVersion={() => setShowNewVersionModal(true)}
             onAddDivider={addDivider}
             onExport={handleExport}
             scoreRange={scoreRange}
@@ -1555,6 +1647,15 @@ const MusicPartitioner = () => {
           </div>
         </div>
       </div>
+
+      {showNewVersionModal && (
+        <NewVersionModal
+          currentVersion={autoSaveVersionName}
+          existingNames={knownVersions}
+          onSave={handleStartNewVersion}
+          onClose={() => setShowNewVersionModal(false)}
+        />
+      )}
 
       {/* Export results — fixed side panel, doesn't affect main layout */}
       {exportResult && (

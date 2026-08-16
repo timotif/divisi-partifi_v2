@@ -217,19 +217,31 @@ def save_setup(
     version_name: str,
     display_width: int,
     setup_dict: dict,
+    create_new: bool = False,
 ) -> int:
-    """Insert or replace a named setup version.  Returns the setup_id."""
+    """Insert or replace a named setup version.  Returns the setup_id.
+
+    With create_new=True the name must be free: an existing one raises
+    sqlite3.IntegrityError instead of being overwritten.  The UNIQUE
+    constraint does the rejecting, so concurrent save-as calls cannot both
+    pass a check-then-write.
+    """
     now = time.time()
-    with get_conn() as conn:
-        cur = conn.execute(
-            """
+    upsert = """
             INSERT INTO setups (score_id, version_name, display_width, setup_json, saved_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(score_id, version_name) DO UPDATE SET
                 display_width = excluded.display_width,
                 setup_json    = excluded.setup_json,
                 saved_at      = excluded.saved_at
-            """,
+            """
+    insert_only = """
+            INSERT INTO setups (score_id, version_name, display_width, setup_json, saved_at)
+            VALUES (?, ?, ?, ?, ?)
+            """
+    with get_conn() as conn:
+        cur = conn.execute(
+            insert_only if create_new else upsert,
             (score_id, version_name, display_width, json.dumps(setup_dict), now),
         )
         # Retrieve the setup_id (INSERT OR UPDATE does not return lastrowid reliably)
