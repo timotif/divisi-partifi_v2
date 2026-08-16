@@ -15,6 +15,7 @@ import {
   pickSuggestionSequence,
   buildKnownSequence as buildSequence,
   autoFillNames,
+  propagationStartIndex,
 } from './utils/knownSequence';
 
 const STRIP_COLUMN_WIDTH = 160;
@@ -1119,15 +1120,11 @@ const MusicPartitioner = () => {
       const propagateSeq = buildGlobalKnownSequence(next, dividersByPage, systemDividersByPage);
       if (propagateSeq.length === 0) return next;
 
-      // Anchor the propagated fill on the name just typed rather than on the
-      // top of the sequence. A page that omits the opening instruments has no
-      // names of its own to resync against -- it was wiped by the from-scratch
-      // refill above -- so without an anchor every propagated page restarts at
-      // position 0. With the sequence fl/ob/cl/fg, typing "ob" on a page that
-      // has no "fl" must leave the other pages reading cl, fg, ...
-      const typedName = filled[stripIndex];
-      const typedPos = propagateSeq.indexOf(typedName);
-      const startIdx = typedPos === -1 ? 0 : typedPos;
+      // Propagated pages start at the top of the sequence unless the typed
+      // name says this ensemble opens mid-sequence. See propagationStartIndex.
+      const startIdx = propagationStartIndex(
+        filled[stripIndex], stripIndex, strips, propagateSeq,
+      );
 
       const pageCount = scoreMetadata?.page_count || 0;
       for (let p = 0; p < pageCount; p++) {

@@ -5,6 +5,7 @@ import {
   pickSuggestionSequence,
   buildKnownSequence,
   autoFillNames,
+  propagationStartIndex,
 } from './knownSequence';
 
 const strips = (...starts) => starts.map(isSystemStart => ({ isSystemStart }));
@@ -347,5 +348,37 @@ describe('resolveGhostName', () => {
     // last, so the next name wraps to the front.
     const s = strips(true, false, false);
     expect(resolveGhostName(['Vla', '', ''], s, SEQ, 1, '')).toBe('Vl1');
+  });
+});
+
+describe('where propagated pages start in the sequence', () => {
+  const SEQ = ['fl', 'ob', 'cl', 'fg'];
+  const page = strips(true, false, false, false);
+
+  test('naming a strip below the first starts other pages at the top', () => {
+    // The reported bug: typing "ob" into strip 1 anchored propagation on "ob",
+    // so every other page began at the sequence's second entry.
+    expect(propagationStartIndex('ob', 1, page, SEQ)).toBe(0);
+    expect(fillNames(['', '', '', ''], page, SEQ, 0)).toEqual(SEQ);
+  });
+
+  test('naming the first strip with the sequence head also starts at the top', () => {
+    expect(propagationStartIndex('fl', 0, page, SEQ)).toBe(0);
+  });
+
+  test('naming the first strip mid-sequence anchors there', () => {
+    // A reduced ensemble that has no "fl" and opens on "ob".
+    expect(propagationStartIndex('ob', 0, page, SEQ)).toBe(1);
+    expect(fillNames(['', '', '', ''], page, SEQ, 1))
+      .toEqual(['ob', 'cl', 'fg', 'fl']);
+  });
+
+  test('a name absent from the sequence starts at the top', () => {
+    expect(propagationStartIndex('tuba', 0, page, SEQ)).toBe(0);
+  });
+
+  test('the first strip of a later system anchors too', () => {
+    const twoSystems = strips(true, false, true, false);
+    expect(propagationStartIndex('cl', 2, twoSystems, SEQ)).toBe(2);
   });
 });

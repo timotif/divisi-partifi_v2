@@ -187,6 +187,33 @@ export function autoFillNames(names, currentStrips, editedIndex, globalSeq = [])
 }
 
 /**
+ * Where propagated pages should start in the sequence after a name is typed.
+ *
+ * The default is the top: with fl/ob/cl/fg, other pages fill fl, ob, cl, fg.
+ *
+ * The exception is a page whose ensemble genuinely begins mid-sequence. The
+ * only evidence for that is the user naming the *first* strip of a system as
+ * something other than the sequence's first entry: on a page with no "fl",
+ * typing "ob" into strip 0 says this ensemble opens at ob, so the other pages
+ * should read ob, cl, fg too.
+ *
+ * Typing "ob" into a lower strip says nothing of the kind — the strip above it
+ * already anchors the page at the top. Anchoring on it there was the bug that
+ * made every propagated page start from the sequence's second entry.
+ *
+ * @param {string} typedName - the name just confirmed.
+ * @param {number} editedIndex - the strip it was typed into.
+ * @param {{isSystemStart: boolean}[]} strips - the edited page's strips.
+ * @param {string[]} sequence - the score-wide sequence being propagated.
+ * @returns {number} the sequence position propagated pages start each system at.
+ */
+export function propagationStartIndex(typedName, editedIndex, strips, sequence) {
+  const pos = sequence.indexOf(typedName);
+  const startsSystem = strips[editedIndex]?.isSystemStart;
+  return (startsSystem && pos > 0) ? pos : 0;
+}
+
+/**
  * What does the sequence call strip `index` on this page, given what's typed
  * there so far?
  *
