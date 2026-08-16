@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { BookOpen, Trash2, FolderOpen, ChevronDown, ChevronRight, Upload, Pencil, UserRound } from 'lucide-react';
+import { BookOpen, Trash2, FolderOpen, ChevronDown, ChevronRight, Upload, Pencil, UserRound, ArrowLeft } from 'lucide-react';
 import ComposerModal from './ComposerModal';
 import ScoreModal from './ScoreModal';
 
@@ -298,13 +298,24 @@ function ComposersTab() {
 // Library screen — top level
 // ---------------------------------------------------------------------------
 
-const LibraryScreen = ({ scores, loading, error, onRestore, onDelete, onUpdate, onUpload }) => {
+const LibraryScreen = ({ scores, loading, error, onRestore, onDelete, onUpdate, onUpload, onBack }) => {
   const [tab, setTab] = useState('scores'); // 'scores' | 'composers'
 
   return (
     <div className="p-6 bg-surface-bg min-h-screen">
       <div className="max-w-2xl mx-auto">
         <div className="bg-surface-card rounded-md shadow-sm border border-surface-border p-6">
+          {/* Return to wherever the library was opened from — it is otherwise a dead end */}
+          {onBack && (
+            <button
+              onClick={onBack}
+              className="inline-flex items-center gap-1.5 mb-4 text-sm text-gray-500 hover:text-accent transition-colors"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              Back
+            </button>
+          )}
+
           {/* Header */}
           <div className="flex items-center justify-between mb-5">
             <div className="flex items-center gap-2">

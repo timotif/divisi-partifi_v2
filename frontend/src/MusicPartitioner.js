@@ -126,6 +126,8 @@ const MusicPartitioner = () => {
   const scoreAreaRef = useRef(null);
   const [measuredSize, setMeasuredSize] = useState({ width: 800, height: 600 });
   const prevPageWidthRef = useRef(null);
+  // Phase the library was opened from, so Back can return there.
+  const libraryOriginRef = useRef('upload');
 
   useEffect(() => {
     if (!scoreAreaRef.current) return;
@@ -498,7 +500,12 @@ const MusicPartitioner = () => {
   const handleOpenLibrary = async () => {
     setLibraryError(null);
     setLibraryLoading(true);
-    setPhase('library');
+    // Remember where we came from so Back returns there — the library is
+    // reachable both from the upload screen and mid-edit via the toolbar.
+    setPhase(prev => {
+      libraryOriginRef.current = prev;
+      return 'library';
+    });
     try {
       const res = await fetch('/api/library');
       if (!res.ok) throw new Error(`Failed to load library: ${res.status}`);
@@ -1344,6 +1351,11 @@ const MusicPartitioner = () => {
         onDelete={handleDeleteScore}
         onUpdate={handleUpdateScore}
         onUpload={() => setPhase('upload')}
+        onBack={() => {
+          const origin = libraryOriginRef.current;
+          // Only return to a score-editing phase if a score is still loaded.
+          setPhase(origin !== 'library' && (origin === 'upload' || scoreId) ? origin : 'upload');
+        }}
       />
     );
   }
