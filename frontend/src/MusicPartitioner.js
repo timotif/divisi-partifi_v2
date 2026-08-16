@@ -13,6 +13,8 @@ import {
   pickMostCommonSequence,
   fillNames,
   pickSuggestionSequence,
+  buildKnownSequence as buildSequence,
+  autoFillNames,
 } from './utils/knownSequence';
 
 const STRIP_COLUMN_WIDTH = 160;
@@ -225,19 +227,10 @@ const MusicPartitioner = () => {
 
   // Build known instrument sequence from a page's strip names + strips.
   // Returns array of unique names from the first system, e.g. ["Vln I", "Vln II", "Vla"].
-  const buildKnownSequence = useCallback((names, pageStrips) => {
-    const known = [];
-    const seen = new Set();
-    for (let i = 0; i < names.length && i < pageStrips.length; i++) {
-      if (i > 0 && pageStrips[i].isSystemStart) break;
-      const name = names[i];
-      if (name === undefined || name === '') break;
-      if (seen.has(name)) break;
-      seen.add(name);
-      known.push(name);
-    }
-    return known;
-  }, []);
+  const buildKnownSequence = useCallback(
+    (names, pageStrips) => buildSequence(names, pageStrips),
+    []
+  );
 
   // Derive strip objects from raw divider/system-flag arrays (same logic as getStrips
   // but works for any page, not just currentPage).
@@ -306,26 +299,11 @@ const MusicPartitioner = () => {
     return pickMostCommonSequence(perPage);
   }, [scoreMetadata, scoreRange, confirmedPages, deriveStrips, buildKnownSequence]);
 
-  const autoFillStripNames = useCallback((names, currentStrips, editedIndex) => {
-    const knownNames = buildKnownSequence(names, currentStrips);
-    if (knownNames.length === 0) return names;
-
-    const editedName = names[editedIndex];
-    let seqIndex = knownNames.indexOf(editedName);
-    if (seqIndex === -1) return names;
-
-    const result = [...names];
-    for (let i = editedIndex + 1; i < currentStrips.length; i++) {
-      if (currentStrips[i].isSystemStart) {
-        seqIndex = -1;
-      }
-      seqIndex++;
-      // Cycle. This is what makes the list expand as it is typed: one name
-      // paints the page, two alternate, and each new name extends the pattern.
-      result[i] = knownNames[seqIndex % knownNames.length];
-    }
-    return result;
-  }, [buildKnownSequence]);
+  const autoFillStripNames = useCallback(
+    (names, currentStrips, editedIndex, globalSeq = []) =>
+      autoFillNames(names, currentStrips, editedIndex, globalSeq),
+    []
+  );
 
   // Sequence the ghost narrows against. See pickSuggestionSequence for why a
   // one-name page sequence must lose to the score-wide vote.
@@ -1113,7 +1091,14 @@ const MusicPartitioner = () => {
   const handleStripNameBlur = (stripIndex) => {
     setStripNamesByPage(prev => {
       const names = [...(prev[currentPage] || [])];
-      const filled = autoFillStripNames(names, strips, stripIndex);
+
+      // Built before this page is filled, so the fill can continue the score's
+      // established order rather than only this page's own names. Auto-filled
+      // names are excluded from the vote anyway (see buildGlobalKnownSequence),
+      // so this page's prefill output cannot feed back into it.
+      const globalSeq = buildGlobalKnownSequence(prev, dividersByPage, systemDividersByPage);
+
+      const filled = autoFillStripNames(names, strips, stripIndex, globalSeq);
       const next = { ...prev, [currentPage]: filled };
 
       // Push the sequence out to every page the user has not touched.
@@ -1129,8 +1114,10 @@ const MusicPartitioner = () => {
       // one-name sequence holds "vl1" on every strip and must be redone once
       // "vl2" exists. confirmedPages marks the pages the user typed on -- those
       // are theirs and are never overwritten.
-      const globalSeq = buildGlobalKnownSequence(next, dividersByPage, systemDividersByPage);
-      if (globalSeq.length === 0) return next;
+      // Recomputed with this page included: naming a strip here may be what
+      // extends the score-wide sequence in the first place.
+      const propagateSeq = buildGlobalKnownSequence(next, dividersByPage, systemDividersByPage);
+      if (propagateSeq.length === 0) return next;
 
       // Anchor the propagated fill on the name just typed rather than on the
       // top of the sequence. A page that omits the opening instruments has no
@@ -1139,7 +1126,7 @@ const MusicPartitioner = () => {
       // position 0. With the sequence fl/ob/cl/fg, typing "ob" on a page that
       // has no "fl" must leave the other pages reading cl, fg, ...
       const typedName = filled[stripIndex];
-      const typedPos = globalSeq.indexOf(typedName);
+      const typedPos = propagateSeq.indexOf(typedName);
       const startIdx = typedPos === -1 ? 0 : typedPos;
 
       const pageCount = scoreMetadata?.page_count || 0;
@@ -1153,7 +1140,7 @@ const MusicPartitioner = () => {
         const pageStrips = deriveStrips(divs, systemDividersByPage[p]);
         if (pageStrips.length === 0) continue;
 
-        next[p] = fillPageNames([], pageStrips, globalSeq, startIdx);
+        next[p] = fillPageNames([], pageStrips, propagateSeq, startIdx);
       }
       return next;
     });

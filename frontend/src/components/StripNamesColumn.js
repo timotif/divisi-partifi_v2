@@ -85,9 +85,14 @@ const StripNamesColumn = ({ strips, stripNames, sequence, pageHeight, onUpdateNa
                   setDismissedIndex(-1);
                   onUpdateName(index, e.target.value);
                 }}
-                onFocus={() => {
+                onFocus={(e) => {
                   setFocusedIndex(index);
                   setDismissedIndex(-1);
+                  // Prefill has already written a name here, so entering the
+                  // field is nearly always a correction. Selecting it makes one
+                  // backspace clear the field and reveal the ghost, instead of
+                  // nibbling the last character.
+                  e.target.select();
                 }}
                 onBlur={() => {
                   setFocusedIndex(-1);

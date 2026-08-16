@@ -3,6 +3,8 @@ import {
   fillNames,
   resolveGhostName,
   pickSuggestionSequence,
+  buildKnownSequence,
+  autoFillNames,
 } from './knownSequence';
 
 const strips = (...starts) => starts.map(isSystemStart => ({ isSystemStart }));
@@ -83,6 +85,87 @@ describe('pickSuggestionSequence', () => {
 
   test('nothing anywhere yields nothing', () => {
     expect(pickSuggestionSequence([], [])).toEqual([]);
+  });
+});
+
+// This is the path the UI actually runs on blur. It lived as a closure inside
+// MusicPartitioner and so was never covered, which is how the "fills from the
+// top of the list" bug survived a green suite.
+describe('autoFillNames: filling the page being typed on', () => {
+  const SEQ = ['fl', 'ob', 'cl', 'fg'];
+  const page = strips(true, false, false, false);
+
+  test('continues from the name typed, not the top of the sequence', () => {
+    expect(autoFillNames(['ob', '', '', ''], page, 0, SEQ))
+      .toEqual(['ob', 'cl', 'fg', 'fl']);
+  });
+
+  test('starting mid-sequence wraps around', () => {
+    expect(autoFillNames(['cl', '', '', ''], page, 0, SEQ))
+      .toEqual(['cl', 'fg', 'fl', 'ob']);
+  });
+
+  test('the unreduced page is unchanged by the anchor', () => {
+    expect(autoFillNames(['fl', '', '', ''], page, 0, SEQ))
+      .toEqual(['fl', 'ob', 'cl', 'fg']);
+  });
+
+  test('editing a strip mid-page refills only below it', () => {
+    expect(autoFillNames(['fl', 'cl', '', ''], page, 1, SEQ))
+      .toEqual(['fl', 'cl', 'fg', 'fl']);
+  });
+
+  test('each system repeats the same reduced run', () => {
+    expect(autoFillNames(['ob', '', '', ''], strips(true, false, true, false), 0, SEQ))
+      .toEqual(['ob', 'cl', 'ob', 'cl']);
+  });
+
+  test('a name outside the sequence leaves the page alone', () => {
+    expect(autoFillNames(['tuba', '', '', ''], page, 0, SEQ))
+      .toEqual(['tuba', '', '', '']);
+  });
+
+  // The expanding list, which has no score-wide sequence to lean on yet. These
+  // pin the behaviour docs/design records as having won over blanking.
+  describe('with no score-wide sequence yet', () => {
+    test('one name paints the whole page', () => {
+      expect(autoFillNames(['vl1', '', '', ''], page, 0))
+        .toEqual(['vl1', 'vl1', 'vl1', 'vl1']);
+    });
+
+    test('two names alternate', () => {
+      expect(autoFillNames(['vl1', 'vl2', '', ''], page, 1))
+        .toEqual(['vl1', 'vl2', 'vl1', 'vl2']);
+    });
+
+    test('a new system restarts at the top, not at the typed name', () => {
+      expect(autoFillNames(['vl1', 'vl2', '', ''], strips(true, false, true, false), 1))
+        .toEqual(['vl1', 'vl2', 'vl1', 'vl2']);
+    });
+  });
+});
+
+describe('buildKnownSequence', () => {
+  test('reads the first system in order', () => {
+    expect(buildKnownSequence(['fl', 'ob', 'cl'], strips(true, false, false)))
+      .toEqual(['fl', 'ob', 'cl']);
+  });
+
+  test('stops at the second system', () => {
+    expect(buildKnownSequence(['fl', 'ob', 'cl'], strips(true, false, true)))
+      .toEqual(['fl', 'ob']);
+  });
+
+  test('stops at the first empty strip', () => {
+    expect(buildKnownSequence(['fl', '', 'cl'], strips(true, false, false)))
+      .toEqual(['fl']);
+  });
+
+  // Prefill's own output must not read back as a sequence -- see the trap in
+  // docs/design/2026-08-16-strip-name-implementation-notes.md.
+  test('stops at a repeat, so cycled prefill yields one name', () => {
+    expect(buildKnownSequence(['vl1', 'vl1', 'vl1'], strips(true, false, false)))
+      .toEqual(['vl1']);
   });
 });
 

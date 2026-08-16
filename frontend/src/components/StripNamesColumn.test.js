@@ -107,6 +107,27 @@ describe('StripNamesColumn ghost text', () => {
   });
 });
 
+describe('focusing a field selects the name already in it', () => {
+  test('the whole name is selected, so one backspace clears it', () => {
+    setup({ names: ['Vl1', '', ''] });
+    const input = screen.getAllByRole('textbox')[0];
+    fireEvent.focus(input);
+
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe('Vl1'.length);
+  });
+
+  test('an empty field has nothing to select and still ghosts', () => {
+    setup({ names: ['', '', ''] });
+    const input = screen.getAllByRole('textbox')[0];
+    fireEvent.focus(input);
+
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(0);
+    expect(screen.getByText('Vl1')).toBeInTheDocument();
+  });
+});
+
 // Issue #3: a name that is a prefix of a sequence entry could not be committed
 // as itself, because the ghost always completed it and Tab always took the
 // completion.

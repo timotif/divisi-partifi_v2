@@ -112,6 +112,81 @@ export function pickSuggestionSequence(pageSeq, globalSeq) {
 }
 
 /**
+ * Read a page's own instrument order out of its first system.
+ *
+ * Stops at the first empty strip, the first repeat, or the second system --
+ * whichever comes first. Stopping at a repeat is what keeps prefill's own
+ * output from being read back as a sequence: once one name is cycled across
+ * the page, the second strip repeats it and the walk ends after one name.
+ *
+ * @param {string[]} names - the page's strip names, in order.
+ * @param {{isSystemStart: boolean}[]} pageStrips - the page's strips, in order.
+ * @returns {string[]} the names of the first system, deduplicated.
+ */
+export function buildKnownSequence(names, pageStrips) {
+  const known = [];
+  const seen = new Set();
+  for (let i = 0; i < names.length && i < pageStrips.length; i++) {
+    if (i > 0 && pageStrips[i].isSystemStart) break;
+    const name = names[i];
+    if (name === undefined || name === '') break;
+    if (seen.has(name)) break;
+    seen.add(name);
+    known.push(name);
+  }
+  return known;
+}
+
+/**
+ * Fill the strips below the one just edited, continuing from the name typed
+ * there.
+ *
+ * The sequence is the score-wide one when there is one, and the page's own
+ * otherwise — the same precedence the ghost uses, so hint and fill never
+ * disagree. Using only the page's own sequence was the bug behind #4/#5: on a
+ * page whose first strip is "ob", `buildKnownSequence` returns just ["ob"] and
+ * every strip below fills "ob", never reaching cl or fg.
+ *
+ * The page's own sequence is still what makes the list expand while a score is
+ * being named for the first time: "vl1" paints the page, adding "vl2" makes it
+ * alternate.
+ *
+ * @param {string[]} names - the page's strip names; the edited one is read.
+ * @param {{isSystemStart: boolean}[]} currentStrips - the page's strips.
+ * @param {number} editedIndex - the strip just typed into.
+ * @param {string[]} [globalSeq=[]] - the score-wide vote, if any.
+ * @returns {string[]} names, with everything below `editedIndex` refilled.
+ */
+export function autoFillNames(names, currentStrips, editedIndex, globalSeq = []) {
+  const pageSeq = buildKnownSequence(names, currentStrips);
+  const knownNames = pickSuggestionSequence(pageSeq, globalSeq);
+  if (knownNames.length === 0) return names;
+
+  const editedName = names[editedIndex];
+  const anchor = knownNames.indexOf(editedName);
+  if (anchor === -1) return names;
+
+  // Where a new system restarts. Against the score-wide sequence it resumes at
+  // the name typed, because a page that omits the opening instruments repeats
+  // the same reduced run in each of its systems. Against the page's own
+  // sequence it restarts at the top — that sequence *is* the page's order, so
+  // vl1/vl2 must stay vl1/vl2 in the second system rather than running on to
+  // vl2/vl1.
+  const systemStart = globalSeq.length > 0 ? anchor : 0;
+
+  let seqIndex = anchor;
+  const result = [...names];
+  for (let i = editedIndex + 1; i < currentStrips.length; i++) {
+    if (currentStrips[i].isSystemStart) seqIndex = systemStart - 1;
+    seqIndex++;
+    // Cycle. This is what makes the list expand as it is typed: one name paints
+    // the page, two alternate, and each new name extends the pattern.
+    result[i] = knownNames[seqIndex % knownNames.length];
+  }
+  return result;
+}
+
+/**
  * What does the sequence call strip `index` on this page, given what's typed
  * there so far?
  *
