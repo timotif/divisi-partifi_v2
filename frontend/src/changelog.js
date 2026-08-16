@@ -7,6 +7,21 @@ export const CHANGELOG = [
   {
     date: '2026-08-16',
     type: 'feature',
+    text: 'Keep several versions of a score. Start a new one at any point, and switch between them while you work.',
+  },
+  {
+    date: '2026-08-16',
+    type: 'feature',
+    text: 'Download finished parts straight from the library, and see which version they came from.',
+  },
+  {
+    date: '2026-08-16',
+    type: 'fix',
+    text: 'Version names keep their accents, so "Fauré" stays "Fauré".',
+  },
+  {
+    date: '2026-08-16',
+    type: 'feature',
     text: 'Instrument names follow the whole score, so turning a page keeps the order you set.',
   },
   {

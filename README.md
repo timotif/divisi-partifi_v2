@@ -119,7 +119,7 @@ Everything partifi.org did:
 - **Upload a PDF score** and extract individual instrument parts
 - **Automatic staff detection** — a four-phase pipeline segments the page into system bands (via vertical barline signal in the left margin), detects staves within each band, confirms system boundaries using barline runs, and produces a confidence score. Dividers are placed automatically and snapped to a clear row between staves; you can adjust, add, or remove any of them.
 - **Auto-fill naming** — name the instruments once in the first system; subsequent staves and pages fill in automatically. The instrument order is learned from the whole score rather than the page on screen, so turning a page continues the sequence instead of restarting it, and a page that omits the opening instruments picks up from whichever name you type first. Focusing a field selects the name in it, so one keystroke clears a wrong guess; an inline suggestion completes what you type, Tab accepts it and Esc dismisses it.
-- **Persistent library** — uploaded scores and their layouts are saved to disk; come back later and pick up where you left off
+- **Persistent library** — uploaded scores and their layouts are saved to disk; come back later and pick up where you left off. Generated parts are listed on each score's card and can be downloaded again without regenerating.
 - **Free** — no account, no subscription, no strings attached
 
 Things we always wished it had:
@@ -130,6 +130,7 @@ Things we always wished it had:
 - **Score page range** — scores often arrive wrapped in front matter or bound together with parts someone already extracted; set the first and last page of the actual score and everything outside it is ignored
 - **Undo and divider snapping** — Ctrl/Cmd+Z steps back through divider edits, and auto-placed dividers snap to a clear row between staves, with an amber marker on the ones that had no clean gap to land in
 - **Built for long scores** — the page navigator windows its dots instead of overflowing, so a 200-page score stays navigable
+- **Named setup versions** — a score can hold several complete arrangements of dividers, names, and layout. Start a new version at any point and your work continues in it, leaving the previous one as it stood; switch between them from the editor or the library. Because a score keeps one set of generated PDFs, the library says which version produced the parts currently on disk.
 - **Composer database** — composers are stored with name, dates, nationality, period, and links; autocomplete on upload, editable from the library at any time
 
 ## A note on partifi.org
