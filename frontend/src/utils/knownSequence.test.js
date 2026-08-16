@@ -3,7 +3,6 @@ import {
   fillNames,
   resolveGhostName,
   pickSuggestionSequence,
-  firstSystemLength,
 } from './knownSequence';
 
 const strips = (...starts) => starts.map(isSystemStart => ({ isSystemStart }));
@@ -60,15 +59,17 @@ describe('the expanding list', () => {
 });
 
 describe('pickSuggestionSequence', () => {
-  // The page-2 regression: naming one strip on a page yields a one-name page
-  // sequence, which used to beat the score-wide vote and blank every strip but
-  // the first of each system. This is what commit 363f439 originally fixed.
+  // The instrument order belongs to the score, not to the page on screen, so
+  // the vote wins whenever there is one and turning a page never restarts the
+  // cycle (issue #5).
   test('a one-name page sequence loses to the score-wide vote', () => {
     expect(pickSuggestionSequence(['Vl1'], FULL)).toEqual(FULL);
   });
 
-  test('a real page sequence beats the vote', () => {
-    expect(pickSuggestionSequence(REDUCED, FULL)).toEqual(REDUCED);
+  test('the vote beats even a full page sequence', () => {
+    // A page with its own ensemble is kept correct by the position resync in
+    // fillNames/resolveGhostName, not by suggesting from the page itself.
+    expect(pickSuggestionSequence(REDUCED, FULL)).toEqual(FULL);
   });
 
   test('a one-name page sequence still beats an empty vote', () => {
@@ -82,6 +83,41 @@ describe('pickSuggestionSequence', () => {
 
   test('nothing anywhere yields nothing', () => {
     expect(pickSuggestionSequence([], [])).toEqual([]);
+  });
+});
+
+describe('a page that omits the opening instruments (issue #4)', () => {
+  const SEQ = ['fl', 'ob', 'cl', 'fg'];
+
+  // The reported expectation: "if the list is fl, ob, cl, fg and in the next
+  // page there's no fl, I type ob and I expect cl, fg to be autofilled."
+  test('typing "ob" first resyncs the rest of the page to cl, fg', () => {
+    expect(fillNames(['ob'], strips(true, false, false), SEQ))
+      .toEqual(['ob', 'cl', 'fg']);
+  });
+
+  test('the ghost agrees with the fill', () => {
+    expect(resolveGhostName(['ob'], strips(true, false, false), SEQ, 1, ''))
+      .toBe('cl');
+    expect(resolveGhostName(['ob', 'cl'], strips(true, false, false), SEQ, 2, ''))
+      .toBe('fg');
+  });
+
+  // Propagated pages are wiped before filling, so they have no name to resync
+  // against and need the anchor passed in explicitly.
+  test('startIdx anchors a page with no names of its own', () => {
+    expect(fillNames([], strips(true, false, false), SEQ, 1))
+      .toEqual(['ob', 'cl', 'fg']);
+  });
+
+  test('startIdx restarts each system at the anchor, not at the top', () => {
+    expect(fillNames([], strips(true, false, true, false), SEQ, 1))
+      .toEqual(['ob', 'cl', 'ob', 'cl']);
+  });
+
+  test('startIdx defaults to the top of the sequence', () => {
+    expect(fillNames([], strips(true, false), SEQ))
+      .toEqual(['fl', 'ob']);
   });
 });
 

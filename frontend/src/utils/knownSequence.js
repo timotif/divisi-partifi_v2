@@ -53,19 +53,26 @@ function isBetterCandidate(cand, best) {
  * Names already present are preserved, and the sequence position resyncs to
  * them so later fills stay aligned with what the user actually typed.
  *
+ * `startIdx` sets where each system begins in the sequence. It exists for
+ * cross-page propagation: a page that omits the opening instruments has no
+ * names of its own to resync against, so the caller passes the position of the
+ * name the user just typed and the page fills on from there. Defaults to 0,
+ * which starts each system at the top of the sequence.
+ *
  * @param {string[]} names - existing names; empty slots get filled.
  * @param {{isSystemStart: boolean}[]} strips - strips for one page, in order.
  * @param {string[]} sequence - the instrument order to apply.
+ * @param {number} [startIdx=0] - sequence position each system starts at.
  * @returns {string[]} names, filled.
  */
-export function fillNames(names, strips, sequence) {
+export function fillNames(names, strips, sequence, startIdx = 0) {
   if (!sequence.length || !strips.length) return names;
 
   const result = [...names];
-  let seqIdx = 0;
+  let seqIdx = startIdx;
 
   for (let i = 0; i < strips.length; i++) {
-    if (strips[i].isSystemStart) seqIdx = 0;
+    if (strips[i].isSystemStart) seqIdx = startIdx;
 
     if (!result[i]) {
       result[i] = sequence[seqIdx % sequence.length];
@@ -81,21 +88,26 @@ export function fillNames(names, strips, sequence) {
 /**
  * Choose which sequence the ghost narrows against on the page being edited.
  *
- * The page's own sequence wins only when it holds more than one name.
- * `buildKnownSequence` stops at the first empty strip, so a page where only
- * strip 0 is named yields a one-name sequence — enough to name the first strip
- * of each system and blank every other one. That is the common case while
- * typing, and it must lose to the score-wide vote rather than beat it.
+ * The score-wide vote wins whenever there is one. The instrument order is a
+ * property of the score, not of the page being looked at, so turning a page
+ * must not restart the cycle.
  *
- * A one-name page sequence still beats nothing: on a fresh score no other page
- * has names yet, so the vote is empty and the page's own is all there is.
+ * The page's own sequence is only a fallback for a fresh score, where no page
+ * has been confirmed yet and the vote is empty.
+ *
+ * This used to prefer the page's own sequence once it held more than one name,
+ * to stop a half-typed page (`buildKnownSequence` stops at the first empty
+ * strip) from blanking every strip but the first. That guard was aimed at the
+ * wrong mechanism: what keeps a page with a different ensemble correct is the
+ * position resync in `fillNames`/`resolveGhostName`, which walks the sequence
+ * to match the names actually present. A reduced page whose first strip reads
+ * "ob" resolves the rest to cl, fg... straight out of the score-wide sequence.
  *
  * @param {string[]} pageSeq - the current page's own sequence.
  * @param {string[]} globalSeq - the score-wide vote.
  * @returns {string[]} the sequence to suggest from.
  */
 export function pickSuggestionSequence(pageSeq, globalSeq) {
-  if (pageSeq.length > 1) return pageSeq;
   return globalSeq.length > 0 ? globalSeq : pageSeq;
 }
 

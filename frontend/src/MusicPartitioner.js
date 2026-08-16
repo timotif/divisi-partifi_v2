@@ -260,12 +260,10 @@ const MusicPartitioner = () => {
   // it at each system divider. For non-empty names (user-typed), sync the
   // sequence position to that name so subsequent fills continue correctly.
   //
-  // A system with more staves than the sequence has names leaves the surplus
-  // BLANK rather than wrapping around. Wrapping produced plausible-looking
-  // names ("Vl1" again after "Continuo") that silently hid an over-detected
-  // staff; a blank shows exactly where detection and the ensemble disagree.
+  // startIdx moves where each system starts in the sequence, for pages that
+  // omit the opening instruments and so have no name of their own to resync on.
   const fillPageNames = useCallback(
-    (names, pageStrips, knownSeq) => fillNames(names, pageStrips, knownSeq),
+    (names, pageStrips, knownSeq, startIdx) => fillNames(names, pageStrips, knownSeq, startIdx),
     []
   );
 
@@ -1134,6 +1132,16 @@ const MusicPartitioner = () => {
       const globalSeq = buildGlobalKnownSequence(next, dividersByPage, systemDividersByPage);
       if (globalSeq.length === 0) return next;
 
+      // Anchor the propagated fill on the name just typed rather than on the
+      // top of the sequence. A page that omits the opening instruments has no
+      // names of its own to resync against -- it was wiped by the from-scratch
+      // refill above -- so without an anchor every propagated page restarts at
+      // position 0. With the sequence fl/ob/cl/fg, typing "ob" on a page that
+      // has no "fl" must leave the other pages reading cl, fg, ...
+      const typedName = filled[stripIndex];
+      const typedPos = globalSeq.indexOf(typedName);
+      const startIdx = typedPos === -1 ? 0 : typedPos;
+
       const pageCount = scoreMetadata?.page_count || 0;
       for (let p = 0; p < pageCount; p++) {
         if (p === currentPage || !isInRange(p, scoreRange)) continue;
@@ -1145,7 +1153,7 @@ const MusicPartitioner = () => {
         const pageStrips = deriveStrips(divs, systemDividersByPage[p]);
         if (pageStrips.length === 0) continue;
 
-        next[p] = fillPageNames([], pageStrips, globalSeq);
+        next[p] = fillPageNames([], pageStrips, globalSeq, startIdx);
       }
       return next;
     });

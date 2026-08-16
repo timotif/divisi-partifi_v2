@@ -1,4 +1,5 @@
 import '@testing-library/jest-dom';
+import { useState } from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import StripNamesColumn from './StripNamesColumn';
 
@@ -103,5 +104,92 @@ describe('StripNamesColumn ghost text', () => {
     fireEvent.focus(inputs[0]);
     fireEvent.keyDown(inputs[0], { key: 'Tab' });
     expect(onUpdateName).toHaveBeenCalledWith(0, 'Vl1');
+  });
+});
+
+// Issue #3: a name that is a prefix of a sequence entry could not be committed
+// as itself, because the ghost always completed it and Tab always took the
+// completion.
+describe('Escape dismisses the ghost', () => {
+  const PICC = ['fl picc', 'ob'];
+
+  // The completion here starts with a space, which getByText would normalise
+  // away, so these queries keep the raw text.
+  const picc = (q) => q(' picc', { normalizer: (s) => s });
+
+  test('the ghost completes a prefix by default', () => {
+    setup({ names: ['fl', ''], sequence: PICC, stripsArg: strips(true, false) });
+    const input = screen.getAllByRole('textbox')[0];
+    fireEvent.focus(input);
+    expect(picc(screen.getByText)).toBeInTheDocument();
+  });
+
+  test('Escape hides the ghost but keeps the typed text', () => {
+    const { onUpdateName } = setup({
+      names: ['fl', ''], sequence: PICC, stripsArg: strips(true, false),
+    });
+    const input = screen.getAllByRole('textbox')[0];
+    fireEvent.focus(input);
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    expect(picc(screen.queryByText)).not.toBeInTheDocument();
+    expect(input).toHaveValue('fl');
+    expect(onUpdateName).not.toHaveBeenCalled();
+  });
+
+  test('Tab after Escape commits the literal text instead of the completion', () => {
+    const { onUpdateName } = setup({
+      names: ['fl', ''], sequence: PICC, stripsArg: strips(true, false),
+    });
+    const input = screen.getAllByRole('textbox')[0];
+    fireEvent.focus(input);
+    fireEvent.keyDown(input, { key: 'Escape' });
+    fireEvent.keyDown(input, { key: 'Tab' });
+
+    // No ghost to accept, so Tab falls through to normal field navigation and
+    // "fl" stands as typed.
+    expect(onUpdateName).not.toHaveBeenCalledWith(0, 'fl picc');
+  });
+
+  test('typing again brings the ghost back', () => {
+    // stripNames is a prop, so a real keystroke has to come back through the
+    // parent. Rendering a stateful host keeps the value and the ghost in step
+    // the way the app does; firing change with an unchanged value would not
+    // reach onChange at all.
+    const Host = () => {
+      const [names, setNames] = useState(['f', '']);
+      return (
+        <StripNamesColumn
+          strips={strips(true, false)}
+          stripNames={names}
+          sequence={PICC}
+          pageHeight={200}
+          onUpdateName={(i, v) => setNames(prev => prev.map((n, j) => (j === i ? v : n)))}
+          onBlurName={() => {}}
+        />
+      );
+    };
+    render(<Host />);
+
+    const input = screen.getAllByRole('textbox')[0];
+    fireEvent.focus(input);
+    expect(screen.getByText('l picc')).toBeInTheDocument();
+
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(screen.queryByText('l picc')).not.toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: 'fl' } });
+    expect(picc(screen.getByText)).toBeInTheDocument();
+  });
+
+  test('the dismissal does not leak to another field', () => {
+    setup({ names: ['fl', ''], sequence: PICC, stripsArg: strips(true, false) });
+    const inputs = screen.getAllByRole('textbox');
+    fireEvent.focus(inputs[0]);
+    fireEvent.keyDown(inputs[0], { key: 'Escape' });
+
+    fireEvent.blur(inputs[0]);
+    fireEvent.focus(inputs[1]);
+    expect(screen.getByText('ob')).toBeInTheDocument();
   });
 });

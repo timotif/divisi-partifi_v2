@@ -10,6 +10,13 @@ const FIELD_TEXT = 'w-full px-3 py-1.5 rounded-md text-sm font-medium border-non
 
 const StripNamesColumn = ({ strips, stripNames, sequence, pageHeight, onUpdateName, onBlurName }) => {
   const [focusedIndex, setFocusedIndex] = useState(-1);
+  // Escape dismisses the ghost for the field being edited, so a name that is a
+  // prefix of a longer one can be committed as itself: with "fl picc" in the
+  // sequence, typing "fl" ghosts " picc" and Tab would always take the longer
+  // name. Dismissal is a single index rather than a set because it lasts only
+  // as long as the current field -- typing, or moving to another field, brings
+  // the ghost back.
+  const [dismissedIndex, setDismissedIndex] = useState(-1);
 
   if (strips.length === 0) return <div className="w-40 flex-shrink-0" style={{ height: pageHeight }} />;
 
@@ -29,7 +36,8 @@ const StripNamesColumn = ({ strips, stripNames, sequence, pageHeight, onUpdateNa
   // wrong and help is wanted. Prefill does the bulk work; this assists the
   // repair. See docs/design/2026-08-16-strip-name-implementation-notes.md.
   const ghostFor = (index) => {
-    if (index !== focusedIndex || !sequence || sequence.length === 0) return '';
+    if (index !== focusedIndex || index === dismissedIndex) return '';
+    if (!sequence || sequence.length === 0) return '';
     return resolveGhostName(stripNames, strips, sequence, index, stripNames[index] || '');
   };
 
@@ -73,13 +81,27 @@ const StripNamesColumn = ({ strips, stripNames, sequence, pageHeight, onUpdateNa
                 id={`strip-name-${index}`}
                 type="text"
                 value={stripNames[index] || ''}
-                onChange={(e) => onUpdateName(index, e.target.value)}
-                onFocus={() => setFocusedIndex(index)}
+                onChange={(e) => {
+                  setDismissedIndex(-1);
+                  onUpdateName(index, e.target.value);
+                }}
+                onFocus={() => {
+                  setFocusedIndex(index);
+                  setDismissedIndex(-1);
+                }}
                 onBlur={() => {
                   setFocusedIndex(-1);
+                  setDismissedIndex(-1);
                   onBlurName(index);
                 }}
                 onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    // Keep the typed text; drop only the completion, so Tab
+                    // commits what is actually in the field.
+                    e.preventDefault();
+                    setDismissedIndex(index);
+                    return;
+                  }
                   if (e.key === 'Tab' && ghost) {
                     e.preventDefault();
                     acceptGhost(index, ghost);
