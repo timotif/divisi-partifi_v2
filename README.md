@@ -7,11 +7,12 @@ Inspired by the original [partifi.org](https://partifi.org) — a tool that was 
 ## How it works
 
 1. **Upload** a PDF score. The backend extracts each page as a high-resolution image.
-2. **Auto-detect staves** — Divisi analyzes each page in four phases: it segments the page into system bands using vertical ink signal in the left margin, detects staves within each band via horizontal projection, confirms system boundaries using barline runs, and scores confidence. Dividers are placed automatically; you can adjust, add, or remove any of them. Toggle auto-detection off to place dividers manually.
-3. **Name instruments** — type part names once and auto-fill handles the rest, cycling through the sequence across systems and pages.
-4. **Select header and markings** (title block, tempo markings) as rectangle regions. These get attached to each part automatically.
-5. **Preview the layout** before exporting. Adjust system spacing, drag individual staves, and insert page breaks. Changes update in real time.
-6. **Generate and download** individual part PDFs, properly paginated onto A4 pages.
+2. **Set the score range** if the file has front matter or already-extracted parts around the score itself — only pages inside the range are analyzed and exported.
+3. **Auto-detect staves** — Divisi analyzes each page in four phases: it segments the page into system bands using vertical ink signal in the left margin, detects staves within each band via horizontal projection, confirms system boundaries using barline runs, and scores confidence. Dividers are placed automatically and snapped to a clear row between staves; you can adjust, add, or remove any of them, and Ctrl/Cmd+Z undoes the last change. Toggle auto-detection off to place dividers manually.
+4. **Name instruments** — type part names once and auto-fill handles the rest, continuing the instrument order across systems and pages.
+5. **Select header and markings** (title block, tempo markings) as rectangle regions. These get attached to each part automatically.
+6. **Preview the layout** before exporting. Adjust system spacing, drag individual staves, and insert page breaks. Changes update in real time.
+7. **Generate and download** individual part PDFs, properly paginated onto A4 pages.
 
 ## Tech stack
 
@@ -60,6 +61,15 @@ npm install
 npm start              # Dev server on port 3000 (proxies to backend)
 ```
 
+### Tests
+
+```bash
+source .venv/bin/activate
+python -m pytest backend/tests -q    # backend
+
+cd frontend && npm test              # frontend (CI=true to run once and exit)
+```
+
 ## Architecture
 
 ```
@@ -81,7 +91,7 @@ frontend/src/
     UploadScreen.js    PDF upload with composer and title autocomplete
     Toolbar.js         Divider tools, header/marking selection, auto-detect toggle
     ScoreCanvas.js     Page image with draggable dividers, rectangle selection, detection overlay
-    StripNamesColumn.js  Editable instrument name list with auto-fill
+    StripNamesColumn.js  Editable instrument name list with auto-fill and inline suggestions
     PageNavigation.js  Page selector with confirmed/detected/untouched indicators
     LayoutPreview.js   Preview phase: part tabs, spacing slider
     PagePreviewArea.js Interactive A4 preview with pagination, draggable staves, page breaks
@@ -93,15 +103,22 @@ frontend/src/
     StaticAutocompleteInput.js  Searchable select backed by a local list
   hooks/
     useAutocomplete.js Reusable debounced fetch + keyboard navigation hook
+  utils/
+    knownSequence.js   Instrument-order model: score-wide vote, name fill, inline suggestion
+    scoreRange.js      1-indexed inclusive page range, converted in one place
+    pageWindow.js      Bounded page-dot set so long scores keep their navigator
 ```
+
+Frontend units are tested with Jest and React Testing Library (`*.test.js`
+alongside the module); backend tests live in `backend/tests/`.
 
 ## Features
 
 Everything partifi.org did:
 
 - **Upload a PDF score** and extract individual instrument parts
-- **Automatic staff detection** — a four-phase pipeline segments the page into system bands (via vertical barline signal in the left margin), detects staves within each band, confirms system boundaries using barline runs, and produces a confidence score. Dividers are placed automatically; you can adjust, add, or remove any of them.
-- **Auto-fill naming** — name the instruments once in the first system; subsequent staves and pages fill in automatically
+- **Automatic staff detection** — a four-phase pipeline segments the page into system bands (via vertical barline signal in the left margin), detects staves within each band, confirms system boundaries using barline runs, and produces a confidence score. Dividers are placed automatically and snapped to a clear row between staves; you can adjust, add, or remove any of them.
+- **Auto-fill naming** — name the instruments once in the first system; subsequent staves and pages fill in automatically. The instrument order is learned from the whole score rather than the page on screen, so turning a page continues the sequence instead of restarting it, and a page that omits the opening instruments picks up from whichever name you type first. Focusing a field selects the name in it, so one keystroke clears a wrong guess; an inline suggestion completes what you type, Tab accepts it and Esc dismisses it.
 - **Persistent library** — uploaded scores and their layouts are saved to disk; come back later and pick up where you left off
 - **Free** — no account, no subscription, no strings attached
 
@@ -110,6 +127,9 @@ Things we always wished it had:
 - **System dividers and dead zones** — shift+click marks where a new system begins; the dead space between systems is excluded and never ends up in a part
 - **Header and markings** — select the title block and tempo/dynamic markings as rectangles once; they travel automatically to every part, repositioned to avoid collisions
 - **Layout preview with per-part control** — adjust system spacing (8–16mm), drag individual staves vertically, and insert forced page breaks per part before generating anything
+- **Score page range** — scores often arrive wrapped in front matter or bound together with parts someone already extracted; set the first and last page of the actual score and everything outside it is ignored
+- **Undo and divider snapping** — Ctrl/Cmd+Z steps back through divider edits, and auto-placed dividers snap to a clear row between staves, with an amber marker on the ones that had no clean gap to land in
+- **Built for long scores** — the page navigator windows its dots instead of overflowing, so a 200-page score stays navigable
 - **Composer database** — composers are stored with name, dates, nationality, period, and links; autocomplete on upload, editable from the library at any time
 
 ## A note on partifi.org

@@ -109,6 +109,16 @@ CLAUDE.md
 .windsurf/
 takeaways.md
 
+# Agent scratchpad: handoffs, plans, session notes, throwaway scripts.
+# Lives in the repo for convenience but is never committed.
+scratchpad/
+
+# Created empty (as root) by the dev compose bind mount
+#   ./requirements.txt:/app/requirements.txt
+# which needs the target to exist. The real file is requirements.txt at the
+# project root; nothing reads this one.
+backend/requirements.txt
+
 # Archives
 *.7z
 *.dmg
@@ -118,3 +128,5 @@ takeaways.md
 *.rar
 *.tar
 *.zip
+# Design/brainstorming docs: local working notes, not part of the repo
+docs/design/

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import UploadScreen from './components/UploadScreen';
 import ExportResults from './components/ExportResults';
 import PageNavigation from './components/PageNavigation';
@@ -8,6 +8,14 @@ import ScoreCanvas from './components/ScoreCanvas';
 import AnnotationsPanel from './components/AnnotationsPanel';
 import LayoutPreview from './components/LayoutPreview';
 import LibraryScreen from './components/LibraryScreen';
+import { isPageInRange as isInRange, updateRange } from './utils/scoreRange';
+import {
+  pickMostCommonSequence,
+  fillNames,
+  pickSuggestionSequence,
+  buildKnownSequence as buildSequence,
+  autoFillNames,
+} from './utils/knownSequence';
 
 const STRIP_COLUMN_WIDTH = 160;
 const ANNOTATIONS_PANEL_WIDTH = 176; // w-44 = 11rem = 176px
@@ -54,6 +62,11 @@ const MusicPartitioner = () => {
 
   // --- Staff detection state ---
   const [autoDetect, setAutoDetect] = useState(true);
+  // Score page range (1-indexed, inclusive) — pages outside it are front matter,
+  // blanks, or pre-extracted parts and are excluded from detection and export.
+  const [scoreRange, setScoreRange] = useState({ from: 1, to: 1 });
+  // { done, total } while a whole-document rescan runs; null otherwise.
+  const [rescanProgress, setRescanProgress] = useState(null);
   const [detectedPages, setDetectedPages] = useState(new Set());
   const [detectingPage, setDetectingPage] = useState(null); // page number or null
   const [detectionWarnings, setDetectionWarnings] = useState({});
@@ -214,19 +227,10 @@ const MusicPartitioner = () => {
 
   // Build known instrument sequence from a page's strip names + strips.
   // Returns array of unique names from the first system, e.g. ["Vln I", "Vln II", "Vla"].
-  const buildKnownSequence = useCallback((names, pageStrips) => {
-    const known = [];
-    const seen = new Set();
-    for (let i = 0; i < names.length && i < pageStrips.length; i++) {
-      if (i > 0 && pageStrips[i].isSystemStart) break;
-      const name = names[i];
-      if (name === undefined || name === '') break;
-      if (seen.has(name)) break;
-      seen.add(name);
-      known.push(name);
-    }
-    return known;
-  }, []);
+  const buildKnownSequence = useCallback(
+    (names, pageStrips) => buildSequence(names, pageStrips),
+    []
+  );
 
   // Derive strip objects from raw divider/system-flag arrays (same logic as getStrips
   // but works for any page, not just currentPage).
@@ -245,66 +249,81 @@ const MusicPartitioner = () => {
     return result;
   }, []);
 
-  // Fill empty strip names on a single page using a known sequence, cycling and
-  // resetting at system dividers. For non-empty names (user-typed), sync the
+  // Fill empty strip names on a single page using a known sequence, restarting
+  // it at each system divider. For non-empty names (user-typed), sync the
   // sequence position to that name so subsequent fills continue correctly.
-  const fillPageNames = useCallback((names, pageStrips, knownSeq) => {
-    if (!knownSeq.length || !pageStrips.length) return names;
-    const result = [...names];
-    let seqIdx = 0;
-    for (let i = 0; i < pageStrips.length; i++) {
-      if (pageStrips[i].isSystemStart) seqIdx = 0;
-      if (!result[i] || result[i] === '') {
-        // Empty: fill from sequence
-        result[i] = knownSeq[seqIdx % knownSeq.length];
-        seqIdx++;
-      } else {
-        // Non-empty (user-typed): sync sequence position to this name
-        const pos = knownSeq.indexOf(result[i]);
-        if (pos !== -1) {
-          seqIdx = pos + 1;
-        } else {
-          seqIdx++;
-        }
-      }
-    }
-    return result;
-  }, []);
+  //
+  // startIdx moves where each system starts in the sequence, for pages that
+  // omit the opening instruments and so have no name of their own to resync on.
+  const fillPageNames = useCallback(
+    (names, pageStrips, knownSeq, startIdx) => fillNames(names, pageStrips, knownSeq, startIdx),
+    []
+  );
 
-  // Build the global known sequence by scanning ALL pages for the first one that
-  // has a complete sequence in its first system.
+  // Build the global known sequence by letting every page vote for the sequence
+  // it shows, then taking the most common one.
+  //
+  // This used to return the first page with any sequence, which let a single
+  // unrepresentative page set the naming for the whole score. A real case: a
+  // score whose opening page carries 7 instruments while the remaining 14 pages
+  // carry 11. The 7-name sequence won on page order alone and then miscycled
+  // across every later page, so names had to be retyped on each one. By vote,
+  // the 11-name sequence wins 14-to-1 and 13 of 15 pages fill correctly.
+  //
+  // Ties break toward the longer sequence, then toward the earlier page: a
+  // longer sequence names more strips, and a shorter one is usually a page
+  // where fewer instruments happen to play.
   const buildGlobalKnownSequence = useCallback((allNames, allDividers, allSystemFlags) => {
     const pageCount = scoreMetadata?.page_count || 0;
+    const perPage = [];
+
     for (let p = 0; p < pageCount; p++) {
       const divs = allDividers[p];
-      const sysFlags = allSystemFlags[p];
       const names = allNames[p];
-      if (!divs || divs.length < 2 || !names) continue;
-      const pageStrips = deriveStrips(divs, sysFlags);
-      const seq = buildKnownSequence(names, pageStrips);
-      if (seq.length > 0) return seq;
-    }
-    return [];
-  }, [scoreMetadata, deriveStrips, buildKnownSequence]);
-
-  const autoFillStripNames = useCallback((names, currentStrips, editedIndex) => {
-    const knownNames = buildKnownSequence(names, currentStrips);
-    if (knownNames.length === 0) return names;
-
-    const editedName = names[editedIndex];
-    let seqIndex = knownNames.indexOf(editedName);
-    if (seqIndex === -1) return names;
-
-    const result = [...names];
-    for (let i = editedIndex + 1; i < currentStrips.length; i++) {
-      if (currentStrips[i].isSystemStart) {
-        seqIndex = -1;
+      // Only pages inside the score range vote: front matter and pre-extracted
+      // parts have their own unrelated layouts.
+      //
+      // And only pages the user has actually typed on. Auto-filled names are
+      // this function's own output cycled back in: after one name is typed,
+      // prefill writes it to every strip, buildKnownSequence stops at that
+      // repeat, and the one-name sequence gets a majority over the page being
+      // typed -- so the whole score locks onto the first name entered.
+      if (!divs || divs.length < 2 || !names || !isInRange(p, scoreRange)
+          || !confirmedPages.has(p)) {
+        perPage.push([]);
+        continue;
       }
-      seqIndex++;
-      result[i] = knownNames[seqIndex % knownNames.length];
+      perPage.push(buildKnownSequence(names, deriveStrips(divs, allSystemFlags[p])));
     }
-    return result;
-  }, [buildKnownSequence]);
+
+    return pickMostCommonSequence(perPage);
+  }, [scoreMetadata, scoreRange, confirmedPages, deriveStrips, buildKnownSequence]);
+
+  const autoFillStripNames = useCallback(
+    (names, currentStrips, editedIndex, globalSeq = []) =>
+      autoFillNames(names, currentStrips, editedIndex, globalSeq),
+    []
+  );
+
+  // Sequence the ghost narrows against. See pickSuggestionSequence for why a
+  // one-name page sequence must lose to the score-wide vote.
+  const currentPageSequence = useMemo(() => {
+    const pageSeq = buildKnownSequence(currentStripNames, strips);
+    const globalSeq = buildGlobalKnownSequence(stripNamesByPage, dividersByPage, systemDividersByPage);
+    return pickSuggestionSequence(pageSeq, globalSeq);
+  }, [buildKnownSequence, currentStripNames, strips, buildGlobalKnownSequence, stripNamesByPage, dividersByPage, systemDividersByPage]);
+
+  // --- Score range change handler (clamped, keeps from <= to) ---
+  const handleChangeScoreRange = useCallback((field, rawValue) => {
+    const pageCount = scoreMetadata?.page_count || 1;
+    setScoreRange(prev => updateRange(prev, field, rawValue, pageCount));
+  }, [scoreMetadata]);
+
+  // --- Helper: is a 0-indexed page inside the score range? ---
+  const isPageInRange = useCallback(
+    (pageIdx) => isInRange(pageIdx, scoreRange),
+    [scoreRange]
+  );
 
   // --- Helper: get the most recently confirmed page's dividers ---
   const getLatestConfirmedDividers = useCallback((beforePage) => {
@@ -360,6 +379,7 @@ const MusicPartitioner = () => {
         pageBreaksByPart: Object.fromEntries(
           Object.entries(pageBreaksByPart).map(([k, v]) => [k, [...v]])
         ),
+        scoreRange,
       };
       fetch(`/api/scores/${scoreId}/setup`, {
         method: 'POST',
@@ -376,7 +396,7 @@ const MusicPartitioner = () => {
     scoreId, phase, pageWidth, autoSaveVersionName,
     dividersByPage, systemDividersByPage, snapFlagsByPage,
     stripNamesByPage, confirmedPages, headerRegion, markings,
-    spacingByPart, offsetsByPart, pageBreaksByPart,
+    spacingByPart, offsetsByPart, pageBreaksByPart, scoreRange,
   ]);
 
   // --- Helpers: reset all editor state ---
@@ -404,6 +424,7 @@ const MusicPartitioner = () => {
     setOffsetsByPart({});
     setPageBreaksByPart({});
     setExportResult(null);
+    setScoreRange({ from: 1, to: Math.max(1, pageCount) });
     prevPageWidthRef.current = null;
   };
 
@@ -549,6 +570,14 @@ const MusicPartitioner = () => {
           restoredBreaks[partName] = new Set(arr);
         }
         setPageBreaksByPart(restoredBreaks);
+
+        // Setups saved before the score-range feature have no scoreRange:
+        // fall back to the whole document so they behave as before.
+        if (s.scoreRange && s.scoreRange.from && s.scoreRange.to) {
+          setScoreRange(s.scoreRange);
+        } else {
+          setScoreRange({ from: 1, to: Math.max(1, pageCount) });
+        }
       }
 
       // If generated parts exist, expose them for download
@@ -642,11 +671,15 @@ const MusicPartitioner = () => {
   }, [scoreMetadata, scoreId, confirmedPages, autoDetect, getLatestConfirmedDividers, getLatestConfirmedStripNames, getLatestConfirmedSystemDividers, dividersByPage, systemDividersByPage, deriveStrips, buildGlobalKnownSequence, fillPageNames]);
 
   // --- Staff detection ---
-  const detectStavesForPage = useCallback(async (pageNum) => {
-    // Skip if already detected, already confirmed, currently detecting, or dividers present
-    if (detectedPages.has(pageNum) || confirmedPages.has(pageNum)) return;
-    if (detectingPage !== null) return;
-    if (dividersByPage[pageNum]?.length > 0) return;
+  // `force` bypasses the skip guards: used by "Rescan all", which has already
+  // cleared page state and drives pages sequentially itself.
+  const detectStavesForPage = useCallback(async (pageNum, force = false) => {
+    if (!force) {
+      // Skip if already detected, already confirmed, currently detecting, or dividers present
+      if (detectedPages.has(pageNum) || confirmedPages.has(pageNum)) return;
+      if (detectingPage !== null) return;
+      if (dividersByPage[pageNum]?.length > 0) return;
+    }
 
     setDetectingPage(pageNum);
 
@@ -716,13 +749,27 @@ const MusicPartitioner = () => {
       });
       // Auto-fill strip names from the global known sequence
       setStripNamesByPage(prev => {
-        if (prev[pageNum]?.length > 0) return prev;
         const pageStrips = deriveStrips(dividers, data.system_flags);
-        const globalSeq = buildGlobalKnownSequence(prev, dividersByPage, systemDividersByPage);
+        // Bail only when the page already carries real names. Testing for a
+        // non-empty array instead let a page detected before any naming keep
+        // the empty strip_names detection wrote, and nothing filled it later.
+        const existing = prev[pageNum] || [];
+        if (pageStrips.length > 0 && pageStrips.every((_, i) => existing[i])) return prev;
+        // Overlay this page's freshly detected geometry onto the closure
+        // snapshot before voting: during a sequential rescan, dividersByPage
+        // is the value captured when this callback was built and does not yet
+        // include the page being detected.
+        const allDividers = { ...dividersByPage, [pageNum]: dividers };
+        const allSysFlags = { ...systemDividersByPage, [pageNum]: data.system_flags };
+        const globalSeq = buildGlobalKnownSequence(prev, allDividers, allSysFlags);
         if (globalSeq.length > 0 && pageStrips.length > 0) {
-          return { ...prev, [pageNum]: fillPageNames([], pageStrips, globalSeq) };
+          return { ...prev, [pageNum]: fillPageNames(existing, pageStrips, globalSeq) };
         }
-        return { ...prev, [pageNum]: data.strip_names };
+        // No sequence yet: keep what the user has and take the backend's names
+        // only for strips still empty.
+        const merged = [...existing];
+        (data.strip_names || []).forEach((n, i) => { if (!merged[i]) merged[i] = n; });
+        return { ...prev, [pageNum]: merged };
       });
 
       // Mark as detected but NOT confirmed — user must review
@@ -741,10 +788,12 @@ const MusicPartitioner = () => {
 
   // Trigger detection when a page is viewed in edit mode and pageWidth is ready
   useEffect(() => {
-    if (autoDetect && phase === 'edit' && scoreId && pageWidth > 1) {
+    // Skip out-of-range pages: running detection on title pages or pre-extracted
+    // parts wastes a request and produces spurious dividers from text lines.
+    if (autoDetect && phase === 'edit' && scoreId && pageWidth > 1 && isPageInRange(currentPage)) {
       detectStavesForPage(currentPage);
     }
-  }, [autoDetect, phase, scoreId, pageWidth, currentPage, detectStavesForPage]);
+  }, [autoDetect, phase, scoreId, pageWidth, currentPage, detectStavesForPage, isPageInRange]);
 
   // Force-rescan the current page: clear all detection state so the auto-detect
   // useEffect re-triggers. Intended to be called after user confirmation.
@@ -759,6 +808,58 @@ const MusicPartitioner = () => {
     setConfirmedPages(prev => { const s = new Set(prev); s.delete(p); return s; });
     // Detection re-triggers automatically via the useEffect above once state is cleared
   }, [currentPage]);
+
+  // Clear every divider on the current page without re-running detection.
+  // Marks the page as "detected" so the auto-detect effect does not immediately
+  // repopulate it — the user asked for an empty page, so leave it empty.
+  const clearPageDividers = useCallback(() => {
+    const p = currentPage;
+    pushUndo(p);
+    setDividersByPage(prev => ({ ...prev, [p]: [] }));
+    setSystemDividersByPage(prev => ({ ...prev, [p]: [] }));
+    setSnapFlagsByPage(prev => ({ ...prev, [p]: [] }));
+    setStripNamesByPage(prev => ({ ...prev, [p]: [] }));
+    setDetectionWarnings(prev => { const n = { ...prev }; delete n[p]; return n; });
+    setDetectedPages(prev => new Set(prev).add(p));
+  }, [currentPage, pushUndo]);
+
+  // Re-run detection across every page in the score range, sequentially.
+  // Detection is serialized backend-side (one in-flight request at a time), so
+  // pages are awaited one by one rather than fired in parallel.
+  const rescanAllPages = useCallback(async () => {
+    if (!scoreMetadata || !scoreId) return;
+    const from = scoreRange.from - 1;
+    const to = scoreRange.to - 1;
+
+    // Clear state for the whole range up front so detection is not skipped by
+    // the "already detected / dividers present" guards in detectStavesForPage.
+    const cleared = {};
+    for (let i = from; i <= to; i++) cleared[i] = [];
+    setDividersByPage(prev => ({ ...prev, ...cleared }));
+    setSystemDividersByPage(prev => ({ ...prev, ...cleared }));
+    setSnapFlagsByPage(prev => ({ ...prev, ...cleared }));
+    setStripNamesByPage(prev => ({ ...prev, ...cleared }));
+    setDetectionWarnings({});
+    setDetectedPages(prev => {
+      const s = new Set(prev);
+      for (let i = from; i <= to; i++) s.delete(i);
+      return s;
+    });
+    setConfirmedPages(prev => {
+      const s = new Set(prev);
+      for (let i = from; i <= to; i++) s.delete(i);
+      return s;
+    });
+    undoStackRef.current = [];
+
+    setRescanProgress({ done: 0, total: to - from + 1 });
+    for (let i = from; i <= to; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await detectStavesForPage(i, true);
+      setRescanProgress({ done: i - from + 1, total: to - from + 1 });
+    }
+    setRescanProgress(null);
+  }, [scoreMetadata, scoreId, scoreRange, detectStavesForPage]);
 
   // --- Divider management ---
   const addDividerAtY = (y, isSystem = false) => {
@@ -990,8 +1091,58 @@ const MusicPartitioner = () => {
   const handleStripNameBlur = (stripIndex) => {
     setStripNamesByPage(prev => {
       const names = [...(prev[currentPage] || [])];
-      const filled = autoFillStripNames(names, strips, stripIndex);
-      return { ...prev, [currentPage]: filled };
+
+      // Built before this page is filled, so the fill can continue the score's
+      // established order rather than only this page's own names. Auto-filled
+      // names are excluded from the vote anyway (see buildGlobalKnownSequence),
+      // so this page's prefill output cannot feed back into it.
+      const globalSeq = buildGlobalKnownSequence(prev, dividersByPage, systemDividersByPage);
+
+      const filled = autoFillStripNames(names, strips, stripIndex, globalSeq);
+      const next = { ...prev, [currentPage]: filled };
+
+      // Push the sequence out to every page the user has not touched.
+      //
+      // Detection runs when a page is first viewed, before any name exists to
+      // build a sequence from, so it leaves the page unnamed and marks it done.
+      // goToPage then skips it (auto-detect is on) and nothing fills it again.
+      // Naming a strip here is the moment a sequence exists, so it is the
+      // moment to propagate.
+      //
+      // Unconfirmed pages are re-filled from scratch, not just gap-filled: the
+      // sequence grows as the user types, so a page seeded earlier from a
+      // one-name sequence holds "vl1" on every strip and must be redone once
+      // "vl2" exists. confirmedPages marks the pages the user typed on -- those
+      // are theirs and are never overwritten.
+      // Recomputed with this page included: naming a strip here may be what
+      // extends the score-wide sequence in the first place.
+      const propagateSeq = buildGlobalKnownSequence(next, dividersByPage, systemDividersByPage);
+      if (propagateSeq.length === 0) return next;
+
+      // Anchor the propagated fill on the name just typed rather than on the
+      // top of the sequence. A page that omits the opening instruments has no
+      // names of its own to resync against -- it was wiped by the from-scratch
+      // refill above -- so without an anchor every propagated page restarts at
+      // position 0. With the sequence fl/ob/cl/fg, typing "ob" on a page that
+      // has no "fl" must leave the other pages reading cl, fg, ...
+      const typedName = filled[stripIndex];
+      const typedPos = propagateSeq.indexOf(typedName);
+      const startIdx = typedPos === -1 ? 0 : typedPos;
+
+      const pageCount = scoreMetadata?.page_count || 0;
+      for (let p = 0; p < pageCount; p++) {
+        if (p === currentPage || !isInRange(p, scoreRange)) continue;
+        if (confirmedPages.has(p)) continue;
+
+        const divs = dividersByPage[p];
+        if (!divs || divs.length < 2) continue;
+
+        const pageStrips = deriveStrips(divs, systemDividersByPage[p]);
+        if (pageStrips.length === 0) continue;
+
+        next[p] = fillPageNames([], pageStrips, propagateSeq, startIdx);
+      }
+      return next;
     });
   };
 
@@ -1046,7 +1197,14 @@ const MusicPartitioner = () => {
 
   // --- Export handler ---
   const handleExport = async () => {
-    const unconfirmedCount = scoreMetadata.page_count - confirmedPages.size;
+    // Count only in-range pages: out-of-range pages are never partitioned,
+    // so they should not trigger the review warning.
+    const inRangeCount = scoreRange.to - scoreRange.from + 1;
+    let confirmedInRange = 0;
+    for (const p of confirmedPages) {
+      if (isPageInRange(p)) confirmedInRange++;
+    }
+    const unconfirmedCount = inRangeCount - confirmedInRange;
     if (unconfirmedCount > 0) {
       const proceed = window.confirm(
         `${unconfirmedCount} page(s) have not been reviewed. Proceed with export?`
@@ -1061,10 +1219,14 @@ const MusicPartitioner = () => {
     const globalSeq = buildGlobalKnownSequence(stripNamesByPage, dividersByPage, systemDividersByPage);
 
     const pagesPayload = {};
-    for (let i = 0; i < scoreMetadata.page_count; i++) {
-      const dividers = dividersByPage[i] || dividersByPage[0] || [];
-      const systemFlags = systemDividersByPage[i] || systemDividersByPage[0] || [];
-      let names = stripNamesByPage[i] || stripNamesByPage[0] || [];
+    // Only pages inside the score range are partitioned; front matter, blanks
+    // and pre-extracted parts are skipped entirely.
+    const firstIdx = scoreRange.from - 1;
+    for (let i = firstIdx; i <= scoreRange.to - 1; i++) {
+      // Fall back to the first in-range page (not page 0, which may be a title page).
+      const dividers = dividersByPage[i] || dividersByPage[firstIdx] || [];
+      const systemFlags = systemDividersByPage[i] || systemDividersByPage[firstIdx] || [];
+      let names = stripNamesByPage[i] || stripNamesByPage[firstIdx] || [];
 
       if (dividers.length < 2) continue;
 
@@ -1287,6 +1449,12 @@ const MusicPartitioner = () => {
             onGoToLibrary={handleOpenLibrary}
             onAddDivider={addDivider}
             onExport={handleExport}
+            scoreRange={scoreRange}
+            onChangeScoreRange={handleChangeScoreRange}
+            pageCount={scoreMetadata?.page_count || 0}
+            onRescanAll={rescanAllPages}
+            onClearPageDividers={clearPageDividers}
+            hasDividersOnPage={currentDividers.length > 0}
             onToggleSelectHeader={() => { setIsSelectingHeader(!isSelectingHeader); setIsSelectingMarking(false); }}
             onToggleSelectMarking={() => { setIsSelectingMarking(!isSelectingMarking); setIsSelectingHeader(false); }}
             isRectSelecting={isRectSelecting}
@@ -1299,7 +1467,8 @@ const MusicPartitioner = () => {
             autoDetect={autoDetect}
             onToggleAutoDetect={() => setAutoDetect(prev => !prev)}
             onForceRescan={forceRescanPage}
-            isDetecting={detectingPage === currentPage}
+            isDetecting={detectingPage !== null || rescanProgress !== null}
+            rescanProgress={rescanProgress}
           />
 
           {/* Error banner */}
@@ -1318,6 +1487,7 @@ const MusicPartitioner = () => {
             <StripNamesColumn
               strips={strips}
               stripNames={currentStripNames}
+              sequence={currentPageSequence}
               pageHeight={pageHeight}
               onUpdateName={updateStripName}
               onBlurName={handleStripNameBlur}
@@ -1367,6 +1537,7 @@ const MusicPartitioner = () => {
             confirmedPages={confirmedPages}
             detectedPages={detectedPages}
             onGoToPage={goToPage}
+            isPageInRange={isPageInRange}
           />
 
           {/* Status info */}

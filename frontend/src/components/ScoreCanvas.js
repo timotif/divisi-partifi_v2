@@ -1,4 +1,13 @@
+import { useState } from 'react';
 import { Trash2, X } from 'lucide-react';
+
+// Half-height of the invisible band around a divider line that accepts drags.
+// 6px keeps two dividers 12px apart individually targetable.
+const DIVIDER_GRAB_HALF = 6;
+
+// Vertical separation between a divider's handles and its line. Applied in
+// opposite directions per divider type so overlapping pairs stay distinguishable.
+const HANDLE_OFFSET = 9;
 
 const ScoreCanvas = ({
   pageWidth,
@@ -25,6 +34,13 @@ const ScoreCanvas = ({
   isDetecting,
   detectionWarning,
 }) => {
+  // Dismissal is per page and per warning text, so navigating to another
+  // problem page (or re-running detection) surfaces the banner again.
+  const [dismissedKey, setDismissedKey] = useState(null);
+  const warningKey = `${currentPage}:${detectionWarning}`;
+  const warningDismissed = dismissedKey === warningKey;
+  const setWarningDismissed = () => setDismissedKey(warningKey);
+
   return (
     <div className="border border-surface-border rounded-md overflow-hidden" style={{ width: pageWidth, flexShrink: 0 }}>
       <div
@@ -87,10 +103,14 @@ const ScoreCanvas = ({
               height: strip.height
             }}
           >
-            <div className="absolute top-1 left-2 bg-accent/70 text-white px-2 py-0.5 rounded text-xs">
+            {/* Name tag. Sits just inside the right edge rather than top-left:
+                the left of a staff carries the clef, key signature and printed
+                instrument name -- the very things you read to check the tag is
+                right. Fades on hover so it never permanently hides music. */}
+            <div className="absolute top-1 right-2 bg-accent/70 group-hover:opacity-20 text-white px-2 py-0.5 rounded text-xs pointer-events-none transition-opacity max-w-[45%] truncate">
               {stripNames[index] || `Part ${num}`}
             </div>
-            <div className="absolute top-2 right-2 bg-black/40 text-white px-2 py-1 rounded text-xs opacity-0 group-hover:opacity-100 transition-opacity">
+            <div className="absolute bottom-1 right-2 bg-black/40 text-white px-2 py-1 rounded text-xs opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
               {strip.height}px tall
             </div>
           </div>
@@ -104,16 +124,43 @@ const ScoreCanvas = ({
           // null/undefined = manual divider (no snap attempted). Only false shows
           // the amber indicator.
           const unsnapped = snapFlags?.[index] === false;
+          // Static, unconditional offset: system handles ride above their line,
+          // part handles below. Between two systems the pair of boundaries can
+          // be ~10px apart; this pulls their handles apart without the offset
+          // ever depending on distance -- a distance-conditional stagger would
+          // make a handle jump sideways mid-drag as the gap closed.
+          // Clamp into the canvas: the wrapper is overflow-hidden, so a system
+          // divider near y=0 would otherwise have its handle clipped away --
+          // exactly the handle you need to recognise the first system.
+          const handleTop = Math.max(
+            0,
+            Math.min(pageHeight - 16, y - 8 + (isSystem ? -HANDLE_OFFSET : HANDLE_OFFSET))
+          );
           return (
           <div key={index}>
             {/* Divider line */}
             <div
-              className={`absolute w-full z-10 ${
+              className={`absolute w-full z-10 pointer-events-none ${
                 isSystem ? 'border-t-[3px] border-system' : 'border-t-2 border-accent'
               }`}
               style={{ top: y }}
-              onMouseDown={(e) => e.stopPropagation()}
+            />
+            {/* Grab strip: the visible line is only 2-3px tall, too thin to hit
+                reliably. This invisible band makes the whole line draggable,
+                which matters most between systems where a part and a system
+                divider can sit ~10px apart and their handles overlap.
+                Split above/below the line so that when two dividers are closer
+                than 2*HALF the nearer one still wins on either side. */}
+            <div
+              className="absolute w-full cursor-ns-resize z-[15]"
+              style={{ top: y - DIVIDER_GRAB_HALF, height: DIVIDER_GRAB_HALF * 2 }}
+              onMouseDown={(e) => { e.stopPropagation(); onDividerMouseDown(e, index); }}
               onClick={(e) => e.stopPropagation()}
+              title={
+                isSystem
+                  ? 'System divider — drag to adjust'
+                  : 'Drag to adjust strip boundary'
+              }
             />
             {/* Unsnapped indicator: amber dashed overlay on the line */}
             {unsnapped && (
@@ -142,7 +189,7 @@ const ScoreCanvas = ({
                     : 'bg-accent hover:bg-accent/80'
               }`}
               style={{
-                top: y - 8,
+                top: handleTop,
                 left: pageWidth - 20
               }}
               onMouseDown={(e) => { e.stopPropagation(); onDividerMouseDown(e, index); }}
@@ -163,7 +210,7 @@ const ScoreCanvas = ({
             <button
               className="absolute w-4 h-4 bg-gray-400 rounded-full cursor-pointer z-20 flex items-center justify-center hover:bg-danger transition-colors text-white"
               style={{
-                top: y - 8,
+                top: handleTop,
                 left: pageWidth - 36
               }}
               onMouseDown={(e) => e.stopPropagation()}
@@ -250,10 +297,19 @@ const ScoreCanvas = ({
           </div>
         )}
 
-        {/* Detection warning banner */}
-        {detectionWarning && !isDetecting && (
-          <div className="absolute top-2 left-2 right-2 z-40 bg-yellow-50 border border-yellow-200 rounded-md px-3 py-2 text-xs text-yellow-700 pointer-events-none">
+        {/* Detection warning banner. Dismissible, and anchored to the bottom:
+            the top of the page is where the first system sits. */}
+        {detectionWarning && !isDetecting && !warningDismissed && (
+          <div className="absolute bottom-2 left-2 right-2 z-40 bg-yellow-50/95 border border-yellow-200 rounded-md pl-3 pr-8 py-2 text-xs text-yellow-700 shadow-sm">
             {detectionWarning}
+            <button
+              className="absolute top-1 right-1 p-1 rounded hover:bg-yellow-200/70 transition-colors"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); setWarningDismissed(true); }}
+              title="Dismiss"
+            >
+              <X className="w-3 h-3" />
+            </button>
           </div>
         )}
       </div>

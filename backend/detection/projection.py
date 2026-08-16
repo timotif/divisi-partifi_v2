@@ -251,7 +251,124 @@ def _split_oversized_group(group, expected_lines, typical_spacing, tolerance):
 # Step 5 — "Squint" rescue pass
 # ---------------------------------------------------------------------------
 
-def _squint_rescue(projection, staves, orphans, expected_lines=5):
+def _reject_misshapen_staves(staves, binary, max_span_ratio=1.5):
+    """Drop candidates whose geometry does not match the page's own staves.
+
+    Staves engraved on one page share a height. A candidate far taller than
+    the page median is a block of ink that happened to yield five peaks --
+    on the test corpus, a colophon paragraph produced a 210px "stave" among
+    60px ones, with line gaps of 42px against a real 15px.
+
+    Height alone is not enough to condemn a candidate (a rescued stave can be
+    slightly off), so a candidate is dropped only when it is both oversized
+    and missing the full-width lines every real stave has.
+
+    Kept deliberately one-sided: undersized candidates are left alone, since
+    a clipped stave is still a stave and dropping it would lose real music.
+    """
+    if len(staves) < 3:
+        return staves
+
+    median_span = float(np.median([s[-1] - s[0] for s in staves]))
+    if median_span <= 0:
+        return staves
+
+    # Reference width from the correctly-sized staves only, so an oversized
+    # candidate cannot inflate the very threshold meant to catch it.
+    normal = [s for s in staves if (s[-1] - s[0]) <= median_span * max_span_ratio]
+    reference = (
+        float(np.median([_row_coverage(binary, s) for s in normal]))
+        if binary is not None and normal else None
+    )
+
+    return [
+        s for s in staves
+        if (s[-1] - s[0]) <= median_span * max_span_ratio
+        or _has_staff_lines(binary, s, reference=reference)
+    ]
+
+
+def _merge_abutting_staves(staves, min_gap_ratio=0.4):
+    """Collapse candidates that sit too close together to be separate staves.
+
+    Two engraved staves are always separated by at least a fraction of their
+    own height. Candidates that abut (or overlap) are therefore two windows
+    over the same music: this happens where a staff is flanked by lyrics, and
+    the detector locks onto the text as well as the staff lines.
+
+    Of each abutting run we keep the candidate with the most ink-dense rows,
+    which is the one centred on the actual staff lines.
+
+    Args:
+        staves: stave arrays sorted top-to-bottom.
+        min_gap_ratio: minimum gap between two staves, as a fraction of the
+            median stave span. 0.4 of a ~60px stave is ~24px; real gaps on
+            the test corpus are 40px and up, false pairs are 2px or less.
+    """
+    if len(staves) < 2:
+        return staves
+
+    median_span = float(np.median([s[-1] - s[0] for s in staves]))
+    min_gap = median_span * min_gap_ratio
+
+    merged = [staves[0]]
+    for stave in staves[1:]:
+        prev = merged[-1]
+        if stave[0] - prev[-1] < min_gap:
+            # Same staff seen twice — keep the taller-spanning candidate,
+            # which covers the five real lines rather than clipping them.
+            if (stave[-1] - stave[0]) > (prev[-1] - prev[0]):
+                merged[-1] = stave
+        else:
+            merged.append(stave)
+    return merged
+
+
+# A candidate must reach this fraction of the width that the page's *own*
+# staves reach. Absolute page-width ratios do not travel: a score with wide
+# margins has staves spanning 0.45 of the page while a densely engraved one
+# reaches 0.84, so the test is relative.
+#
+# Measured over every rescue candidate in the four test fixtures, the two
+# populations separate cleanly: true staves score 0.73, 0.83 and 0.99 of the
+# reference, while text and artifacts score 0.11 to 0.50. 0.6 sits in the
+# empty band between them.
+_STAFF_LINE_WIDTH_RATIO = 0.6
+
+
+def _row_coverage(binary, stave, margin=3):
+    """Widest single row of ink within a stave's Y range, as a fraction of width."""
+    h, w = binary.shape[:2]
+    lo = max(0, int(stave[0]) - margin)
+    hi = min(h, int(stave[-1]) + margin + 1)
+    if lo >= hi or w == 0:
+        return 0.0
+    return float(((binary[lo:hi] > 0).sum(axis=1) / w).max())
+
+
+def _has_staff_lines(binary, stave, reference=None, margin=3):
+    """True if the stave's Y range contains a row as wide as a real staff line.
+
+    Distinguishes a real stave from a line of lyrics or other text, which
+    blurs into a hill of similar height but never spans the system: its ink
+    is short words separated by white.
+
+    Args:
+        reference: widest-row coverage typical of this page's known staves.
+            When omitted, falls back to an absolute half-width test.
+
+    Returns True when ``binary`` is None so callers without the image keep
+    the previous behaviour.
+    """
+    if binary is None:
+        return True
+    coverage = _row_coverage(binary, stave, margin)
+    if reference is None or reference <= 0:
+        return coverage >= 0.5
+    return coverage >= reference * _STAFF_LINE_WIDTH_RATIO
+
+
+def _squint_rescue(projection, staves, orphans, expected_lines=5, binary=None):
     """Rescue staves missed by the precise first pass using heavy blur.
 
     Like squinting at the page: a large moving-average kernel collapses each
@@ -265,6 +382,15 @@ def _squint_rescue(projection, staves, orphans, expected_lines=5):
         below the last first-pass stave).
       - Hill must be at least 60% as tall as the median known-stave hill
         (filters out footer text, page numbers, etc.).
+      - Hill must contain at least one near-full-width ink row (see
+        ``_has_staff_lines``). A blurred line of lyrics forms a hill of the
+        same height as a real stave, but its ink is short words with white
+        between them; a real stave has five lines spanning the system.
+
+    Args:
+        binary: ink=255 image for the same Y range as ``projection``. When
+            omitted the full-width check is skipped (callers that lack the
+            image keep the previous, looser behaviour).
     """
     if not orphans or not staves:
         return staves, orphans
@@ -312,6 +438,13 @@ def _squint_rescue(projection, staves, orphans, expected_lines=5):
     ]
     min_hill_height = np.median(known_heights) * 0.6 if known_heights else 0
 
+    # How wide a row of ink this page's real staves reach. Used to judge
+    # rescued candidates against the page's own engraving, not a fixed ratio.
+    line_reference = (
+        float(np.median([_row_coverage(binary, s) for s in staves]))
+        if binary is not None and staves else None
+    )
+
     # --- Synthesize staves for uncovered hills ---
     # Process top-to-bottom; each rescued stave extends the reach downward
     # so we can chain-rescue a whole system below the last known stave.
@@ -331,7 +464,15 @@ def _squint_rescue(projection, staves, orphans, expected_lines=5):
         stave = np.array([
             int(round(top + i * typical_spacing)) for i in range(expected_lines)
         ])
+        if not _has_staff_lines(binary, stave, reference=line_reference):
+            continue
         rescued.append(stave)
+        # Exclude the new stave's own neighbourhood from further rescues.
+        # Without this, a second hill a few pixels away synthesizes a stave
+        # that physically overlaps this one -- observed on lyric lines, where
+        # the blurred text forms several adjacent hills between two vocal
+        # staves and each one produced its own phantom stave.
+        covered_ranges.append((int(stave[0]) - cover_margin, int(stave[-1]) + cover_margin))
         current_bottom = max(current_bottom, int(stave[-1]))
 
     # Orphans that now fall inside a rescued stave are no longer orphans
@@ -811,11 +952,61 @@ def _split_runs_into_systems(runs, staves):
     return spans
 
 
+def _cluster_by_bridges(staves, binary, search_ratio=0.45):
+    """Group staves by whether a vertical line bridges the gap between them.
+
+    Within a system every staff is joined to the next by the initial barline
+    (and the brace/bracket); between systems nothing crosses the gap. So the
+    question "same system?" reduces to: does any single column carry ink
+    through the entire gap between these two staves?
+
+    This is more robust than locating the barline's x first. Systems on one
+    page need not share a column -- a first system labelled ``VIOLIN I`` puts
+    its barline ~160px right of later systems labelled ``V. I`` -- and a
+    page-global column then misses whole systems. Here the column is never
+    named; it only has to exist somewhere in the left portion of the page.
+
+    Args:
+        staves: stave arrays sorted top-to-bottom.
+        binary: ink=255 image.
+        search_ratio: fraction of page width to search for a bridging column.
+            Kept left of centre so inner barlines between measures, which
+            also bridge, cannot vote.
+
+    Returns:
+        list of lists of stave arrays, or None if the input is unusable.
+    """
+    if binary is None or len(staves) < 2:
+        return None
+
+    h, w = binary.shape[:2]
+    limit = max(1, int(w * search_ratio))
+
+    systems = [[staves[0]]]
+    for prev, stave in zip(staves, staves[1:]):
+        y0 = int(prev[-1]) + 2
+        y1 = int(stave[0]) - 2
+        if y1 <= y0:
+            # Touching staves: no gap to inspect, treat as the same system.
+            systems[-1].append(stave)
+            continue
+        gap = binary[y0:y1, :limit] > 0
+        bridged = bool(gap.all(axis=0).any())
+        if bridged:
+            systems[-1].append(stave)
+        else:
+            systems.append([stave])
+
+    return systems
+
+
 def cluster_into_systems(staves, binary=None):
     """Group staves into systems.
 
-    Primary: find the barline on the full page, find where it breaks, use
-    breaks as system boundaries. Fallback: gap heuristic on stave positions.
+    Primary: a staff is in the same system as the one above it when a single
+    column of ink bridges the gap between them (the initial barline). See
+    _cluster_by_bridges. Fallbacks: page-global barline runs, then a gap
+    heuristic on stave positions.
 
     After grouping, each system is confirmed by checking that a continuous
     barline spans it (morphological opening).
@@ -835,8 +1026,11 @@ def cluster_into_systems(staves, binary=None):
     systems = None
     fine_x = None
 
-    # Primary: barline-based grouping on full page
-    if binary is not None:
+    # Primary: bridge test between consecutive staves
+    systems = _cluster_by_bridges(staves, binary)
+
+    # Fallback: barline-based grouping on full page
+    if systems is None and binary is not None:
         h, w = binary.shape[:2]
         rough_x = find_barline_x(binary, 0, h - 1)
         if rough_x is not None:
@@ -1022,13 +1216,17 @@ def detect_staves(source, page_num=0) -> dict:
         # All coords are band-relative here — squint must see matching arrays
         peaks_band, _ = find_staff_line_peaks(band_proj)
         staves_band, orphans_band = cluster_into_staves(peaks_band)
-        staves_band, orphans_band = _squint_rescue(band_proj, staves_band, orphans_band)
+        staves_band, orphans_band = _squint_rescue(
+            band_proj, staves_band, orphans_band, binary=binary[y_top:y_bottom + 1]
+        )
 
         # Offset to full-image Y space
         all_staves.extend(s + y_top for s in staves_band)
         all_orphans.extend(o + y_top for o in orphans_band)
 
     all_staves.sort(key=lambda s: s[0])
+    all_staves = _merge_abutting_staves(all_staves)
+    all_staves = _reject_misshapen_staves(all_staves, binary)
 
     # Full-page peaks retained for confidence scoring (orphan ratio denominator)
     peaks, smoothed = find_staff_line_peaks(projection)
